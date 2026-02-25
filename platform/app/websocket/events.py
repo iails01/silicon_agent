@@ -8,6 +8,7 @@ AGENT_SESSION_UPDATE = "agent:session_update"
 TASK_CREATED = "task:created"
 TASK_STATUS_CHANGED = "task:status_changed"
 TASK_STAGE_UPDATE = "task:stage_update"
+TASK_STAGE_LOG = "task:stage_log"
 
 # Gate events
 GATE_CREATED = "gate:created"

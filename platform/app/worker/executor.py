@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.agent import AgentModel
 from app.models.task import TaskModel, TaskStageModel
 from app.services.task_log_service import TaskLogService
-from app.websocket.events import AGENT_STATUS_CHANGED, TASK_STAGE_UPDATE
+from app.websocket.events import AGENT_STATUS_CHANGED, TASK_STAGE_LOG, TASK_STAGE_UPDATE
 from app.websocket.manager import ws_manager
 from app.config import settings
 from app.worker.agents import get_agent, get_agent_text_only
@@ -145,6 +145,7 @@ async def execute_stage(
         missing_fields: Optional[list[str]] = None,
         created_at: Optional[datetime] = None,
     ) -> None:
+        ts = created_at or datetime.now(timezone.utc).replace(tzinfo=None)
         stage_logs.append(
             {
                 "task_id": str(task.id),
@@ -163,9 +164,33 @@ async def execute_stage(
                 "result": result,
                 "missing_fields": missing_fields or [],
                 # Record event occurrence time, instead of stage-end flush time.
-                "created_at": created_at or datetime.now(timezone.utc).replace(tzinfo=None),
+                "created_at": ts,
             }
         )
+
+        # Broadcast real-time stage log event (fire-and-forget)
+        if event_type in ("tool_call_executed", "llm_response_received"):
+            payload = {
+                "task_id": str(task.id),
+                "stage_id": str(stage.id),
+                "stage_name": stage.stage_name,
+                "event_type": event_type,
+                "event_source": event_source,
+                "status": status,
+                "command": command,
+                "duration_ms": duration_ms,
+                "timestamp": ts.isoformat(),
+            }
+            # Truncate result for WS payload (avoid huge messages)
+            if result:
+                payload["result_preview"] = result[:500]
+            if response_body and response_body.get("content"):
+                payload["result_preview"] = str(response_body["content"])[:500]
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(_safe_broadcast(TASK_STAGE_LOG, payload))
+            except RuntimeError:
+                pass
 
     # Create runner with per-stage model routing
     runner = get_agent(stage.agent_role, str(task.id), model=stage_model)

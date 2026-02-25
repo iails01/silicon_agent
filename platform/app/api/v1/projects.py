@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 
 from app.dependencies import get_project_service
 from app.schemas.project import (
@@ -44,7 +45,10 @@ async def create_project(
     request: ProjectCreateRequest,
     service: ProjectService = Depends(get_project_service),
 ):
-    return await service.create_project(request)
+    try:
+        return await service.create_project(request)
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail=f"Project '{request.name}' already exists")
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)

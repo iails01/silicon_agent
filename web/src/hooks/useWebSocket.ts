@@ -3,7 +3,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useAgentStore } from '@/stores/agentStore';
 import { useActivityStore } from '@/stores/activityStore';
 import { useNotificationStore } from '@/stores/notificationStore';
-import type { WSMessage, WSAgentStatusPayload, WSActivityPayload, WSGatePayload } from '@/types/websocket';
+import { useStageLogStore } from '@/stores/stageLogStore';
+import type { WSMessage, WSAgentStatusPayload, WSActivityPayload, WSGatePayload, WSStageLogPayload } from '@/types/websocket';
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
@@ -106,6 +107,11 @@ export function useWebSocket() {
             read: false,
           });
           useNotificationStore.getState().bumpRefresh();
+          break;
+        }
+        case 'stage_log': {
+          const sl = msg.payload as WSStageLogPayload;
+          useStageLogStore.getState().addLog(sl);
           break;
         }
         case 'pong':

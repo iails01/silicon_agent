@@ -173,17 +173,27 @@ const ProjectList: React.FC = () => {
         title="Create Project"
         open={createOpen}
         onOpenChange={setCreateOpen}
+        submitter={{
+          submitButtonProps: {
+            loading: createProject.isPending,
+          },
+        }}
         onFinish={async (values: Record<string, string>) => {
-          await createProject.mutateAsync({
-            name: values.name,
-            display_name: values.display_name,
-            repo_url: values.repo_url || undefined,
-            branch: values.branch || 'main',
-            description: values.description || undefined,
-          });
-          message.success('Project created');
-          actionRef.current?.reload();
-          return true;
+          try {
+            await createProject.mutateAsync({
+              name: values.name,
+              display_name: values.display_name,
+              repo_url: values.repo_url || undefined,
+              branch: values.branch || 'main',
+              description: values.description || undefined,
+            });
+            message.success('Project created');
+            actionRef.current?.reload();
+            return true;
+          } catch (err: any) {
+            message.error(err?.response?.data?.detail || 'Failed to create project');
+            return false;
+          }
         }}
       >
         <ProFormText name="name" label="Project Code" placeholder="e.g. silicon-agent" rules={[{ required: true }]} />

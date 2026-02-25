@@ -44,7 +44,7 @@ class LLMClient:
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            proxy=None,
+            transport=httpx.AsyncHTTPTransport(proxy=None),
         )
 
     async def chat(

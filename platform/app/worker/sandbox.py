@@ -81,7 +81,10 @@ class SandboxManager:
     @property
     def http_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), proxy=None)
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(600, connect=10),
+                transport=httpx.AsyncHTTPTransport(proxy=None),
+            )
         return self._http_client
 
     async def create(

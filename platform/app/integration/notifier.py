@@ -23,7 +23,7 @@ def _get_client() -> httpx.AsyncClient:
     if _client is None:
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(10.0, connect=5.0),
-            proxy=None,
+            transport=httpx.AsyncHTTPTransport(proxy=None),
         )
     return _client
 

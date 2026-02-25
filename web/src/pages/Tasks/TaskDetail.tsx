@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message } from 'antd';
-import { ArrowLeftOutlined, StopOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline } from 'antd';
+import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined } from '@ant-design/icons';
 import { useTask, useCancelTask, useRetryTask } from '@/hooks/useTasks';
+import { useStageLogStore } from '@/stores/stageLogStore';
 import PipelineView from '@/components/PipelineView';
 import { STAGE_NAMES } from '@/utils/constants';
 import { formatTimestamp, formatTokens, formatCost, formatDuration } from '@/utils/formatters';
@@ -21,6 +22,65 @@ const STATUS_COLOR: Record<string, string> = {
 const STAGE_DISPLAY: Record<string, string> = Object.fromEntries(
   STAGE_NAMES.map((sn) => [sn.key, sn.name])
 );
+
+const EVENT_ICONS: Record<string, React.ReactNode> = {
+  tool_call_executed: <CodeOutlined style={{ color: '#1890ff' }} />,
+  llm_response_received: <RobotOutlined style={{ color: '#52c41a' }} />,
+  llm_request_sent: <LoadingOutlined style={{ color: '#faad14' }} />,
+};
+
+const EMPTY_LOGS: import('@/types/websocket').WSStageLogPayload[] = [];
+
+const StageLiveLog: React.FC<{ stageId: string }> = ({ stageId }) => {
+  const logs = useStageLogStore((s) => s.logsByStage[stageId] ?? EMPTY_LOGS);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const logCount = logs.length;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [logCount]);
+
+  if (logCount === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: '24px 0' }}>
+        <LoadingOutlined style={{ fontSize: 24, marginBottom: 8 }} />
+        <div style={{ color: '#999' }}>等待执行日志...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} style={{ maxHeight: 400, overflow: 'auto', padding: '0 8px' }}>
+      <Timeline
+        items={logs.map((log, i) => ({
+          key: i,
+          dot: EVENT_ICONS[log.event_type] || EVENT_ICONS.llm_request_sent,
+          children: (
+            <div style={{ fontSize: 13 }}>
+              <div>
+                <Tag color={log.status === 'success' ? 'green' : log.status === 'failed' ? 'red' : 'blue'} style={{ fontSize: 11 }}>
+                  {log.event_source}
+                </Tag>
+                <span style={{ fontWeight: 500 }}>{log.command || log.event_type}</span>
+                {log.duration_ms != null && (
+                  <span style={{ color: '#999', marginLeft: 8 }}>{(log.duration_ms / 1000).toFixed(1)}s</span>
+                )}
+              </div>
+              {log.result_preview && (
+                <pre style={{ marginTop: 4, marginBottom: 0, fontSize: 12, color: '#666', whiteSpace: 'pre-wrap', maxHeight: 80, overflow: 'hidden' }}>
+                  {log.result_preview}
+                </pre>
+              )}
+            </div>
+          ),
+        }))}
+      />
+    </div>
+  );
+};
 
 const TaskDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -118,6 +178,8 @@ const TaskDetail: React.FC = () => {
                       </div>
                     )}
                   </div>
+                ) : stage.status === 'running' ? (
+                  <StageLiveLog stageId={stage.id} />
                 ) : (
                   <Empty description="暂无产出" />
                 )}

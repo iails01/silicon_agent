@@ -2,6 +2,7 @@ export type WSMessageType =
   | 'agent_status'
   | 'activity'
   | 'task_update'
+  | 'stage_log'
   | 'gate_created'
   | 'gate_resolved'
   | 'tool_executing'
@@ -40,4 +41,17 @@ export interface WSToolExecutingPayload {
   role: string;
   tool_name: string;
   task_id: string;
+}
+
+export interface WSStageLogPayload {
+  task_id: string;
+  stage_id: string;
+  stage_name: string;
+  event_type: string;
+  event_source: string;
+  status: string;
+  command?: string;
+  duration_ms?: number;
+  result_preview?: string;
+  timestamp: string;
 }
