@@ -25,6 +25,7 @@ class ProjectModel(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     tech_stack: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     repo_tree: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sandbox_image: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

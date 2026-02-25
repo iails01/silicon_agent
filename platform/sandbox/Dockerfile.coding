@@ -1,0 +1,22 @@
+FROM silicon-agent-sandbox:base
+
+USER root
+
+# Development toolchain
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ make \
+    nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Common Python dev tools
+RUN pip install --no-cache-dir \
+    pytest ruff black mypy \
+    httpx pydantic sqlalchemy aiosqlite \
+    fastapi uvicorn
+
+# Common Node.js tools
+RUN npm install -g typescript tsx prettier eslint 2>/dev/null || true
+
+USER agent
+WORKDIR /workspace
+CMD ["python", "/app/agent_server.py", "--port", "9090"]

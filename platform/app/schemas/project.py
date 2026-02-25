@@ -10,16 +10,20 @@ class ProjectCreateRequest(BaseModel):
     name: str
     display_name: str
     repo_url: Optional[str] = None
+    repo_local_path: Optional[str] = None
     branch: str = "main"
     description: Optional[str] = None
+    sandbox_image: Optional[str] = None
 
 
 class ProjectUpdateRequest(BaseModel):
     display_name: Optional[str] = None
     repo_url: Optional[str] = None
+    repo_local_path: Optional[str] = None
     branch: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    sandbox_image: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -27,11 +31,13 @@ class ProjectResponse(BaseModel):
     name: str
     display_name: str
     repo_url: Optional[str] = None
+    repo_local_path: Optional[str] = None
     branch: str = "main"
     description: Optional[str] = None
     status: str = "active"
     tech_stack: Optional[List[str]] = None
     repo_tree: Optional[str] = None
+    sandbox_image: Optional[str] = None
     last_synced_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime

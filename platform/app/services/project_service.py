@@ -72,8 +72,10 @@ class ProjectService:
             name=request.name,
             display_name=request.display_name,
             repo_url=request.repo_url,
+            repo_local_path=request.repo_local_path,
             branch=request.branch,
             description=request.description,
+            sandbox_image=request.sandbox_image,
         )
         self.session.add(project)
         await self.session.commit()
@@ -96,6 +98,10 @@ class ProjectService:
             project.description = request.description
         if request.status is not None:
             project.status = request.status
+        if request.repo_local_path is not None:
+            project.repo_local_path = request.repo_local_path
+        if request.sandbox_image is not None:
+            project.sandbox_image = request.sandbox_image
         await self.session.commit()
         await self.session.refresh(project)
         return ProjectResponse.model_validate(project)

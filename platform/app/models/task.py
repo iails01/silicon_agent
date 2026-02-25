@@ -28,6 +28,8 @@ class TaskModel(Base):
         DateTime, nullable=False, server_default=func.now()
     )
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    branch_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    pr_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     template_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("task_templates.id"), nullable=True

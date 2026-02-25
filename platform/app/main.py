@@ -72,6 +72,9 @@ async def lifespan(app: FastAPI):
     await stop_worker()
     from app.integration.notifier import close_notifier
     await close_notifier()
+    if settings.SANDBOX_ENABLED:
+        from app.worker.sandbox import close_sandbox_manager
+        await close_sandbox_manager()
 
 
 app = FastAPI(

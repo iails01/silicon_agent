@@ -42,6 +42,8 @@ class TaskDetailResponse(BaseModel):
     total_cost_rmb: float = 0.0
     created_at: datetime
     completed_at: Optional[datetime] = None
+    branch_name: Optional[str] = None
+    pr_url: Optional[str] = None
     stages: List[TaskStageResponse] = []
     template_id: Optional[str] = None
     project_id: Optional[str] = None

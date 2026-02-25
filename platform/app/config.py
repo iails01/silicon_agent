@@ -63,6 +63,18 @@ class Settings(BaseSettings):
     WORKTREE_AUTO_BRANCH: bool = True  # auto-create feature branches
     WORKTREE_AUTO_PR: bool = False  # auto-create PR on task completion
 
+    # Container sandbox configuration
+    SANDBOX_ENABLED: bool = False
+    SANDBOX_IMAGE: str = "silicon-agent-sandbox:coding"
+    SANDBOX_CPUS: float = 2.0
+    SANDBOX_MEMORY: str = "4g"
+    SANDBOX_PIDS_LIMIT: int = 256
+    SANDBOX_NETWORK: str = "sa-sandbox-net"
+    SANDBOX_EXEC_TIMEOUT: int = 300
+    SANDBOX_AGENT_PORT: int = 9090
+    SANDBOX_READONLY_ROOT: bool = True
+    SANDBOX_MAX_CONCURRENT: int = 4
+
     # Memory & compression configuration
     MEMORY_ENABLED: bool = True
     MEMORY_COMPRESSION_ENABLED: bool = True

@@ -12,6 +12,11 @@ services:
       - JWT_ENABLED=false
       - SKILLKIT_ENABLED=false
       - DEBUG=true
+      # Sandbox configuration (set SANDBOX_ENABLED=true to enable)
+      - SANDBOX_ENABLED=false
+      - SANDBOX_NETWORK=sa-sandbox-net
+      - WORKTREE_ENABLED=false
+      - WORKTREE_BASE_DIR=/data/worktrees
     depends_on:
       postgres:
         condition: service_healthy
@@ -20,6 +25,11 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - memory_data:/app/memory
+      - worktree_data:/data/worktrees
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - default
+      - sa-sandbox-net
 
   postgres:
     image: postgres:16-alpine
@@ -49,7 +59,12 @@ services:
       timeout: 3s
       retries: 5
 
+networks:
+  sa-sandbox-net:
+    driver: bridge
+
 volumes:
   pgdata:
   redisdata:
   memory_data:
+  worktree_data:

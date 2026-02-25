@@ -1,0 +1,28 @@
+FROM python:3.11-slim AS base
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget jq tree openssh-client ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -s /bin/bash -u 1000 agent && \
+    mkdir -p /workspace /output /skills /app && \
+    chown -R agent:agent /workspace /output /skills /app
+
+WORKDIR /app
+
+# Install agent server dependencies
+COPY sandbox/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Copy agent server
+COPY sandbox/agent_server.py /app/agent_server.py
+
+# Copy skills
+COPY skills/ /skills/
+
+EXPOSE 9090
+
+USER agent
+CMD ["python", "/app/agent_server.py", "--port", "9090"]

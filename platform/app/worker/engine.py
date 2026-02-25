@@ -26,7 +26,7 @@ from app.models.task import TaskModel, TaskStageModel
 from app.websocket.events import CB_TRIGGERED, GATE_CREATED, TASK_STATUS_CHANGED
 from app.websocket.manager import ws_manager
 from app.worker.compressor import CompressionResult, compress_stage_output
-from app.worker.executor import execute_stage, mark_stage_failed
+from app.worker.executor import execute_stage, execute_stage_sandboxed, mark_stage_failed
 from app.worker.worktree import get_worktree_manager
 
 logger = logging.getLogger(__name__)
@@ -232,6 +232,35 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                 task.id, exc_info=True,
             )
 
+    # Setup container sandbox (方式1: 整体容器化)
+    sandbox_info = None
+    sandbox_mgr = None
+    if settings.SANDBOX_ENABLED:
+        from app.worker.sandbox import get_sandbox_manager
+        sandbox_mgr = get_sandbox_manager()
+        sandbox_image = None
+        if task.project and task.project.sandbox_image:
+            sandbox_image = task.project.sandbox_image
+        try:
+            sandbox_info = await sandbox_mgr.create(
+                str(task.id),
+                worktree_path=worktree_path,
+                tmpdir=str(
+                    __import__("pathlib").Path(__import__("tempfile").gettempdir())
+                    / "silicon_agent" / "tasks" / str(task.id)
+                ),
+                image=sandbox_image,
+            )
+            if sandbox_info:
+                logger.info("Task %s using sandbox container: %s", task.id, sandbox_info.container_name)
+            else:
+                logger.warning("Sandbox creation failed for task %s, falling back to in-process", task.id)
+        except Exception:
+            logger.warning(
+                "Failed to create sandbox for task %s, falling back to in-process",
+                task.id, exc_info=True,
+            )
+
     # Load project memory for this task's project
     project_memory_store = None
     if settings.MEMORY_ENABLED and task.project_id:
@@ -283,7 +312,7 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
             result = await _execute_single_stage(
                 session, task, stage, stage_index_base,
                 prior_outputs, compression, project_memory_store,
-                repo_context, stage_defs, worktree_path,
+                repo_context, stage_defs, worktree_path, sandbox_info,
             )
             if result is None:
                 return  # stage failed or circuit breaker
@@ -320,7 +349,7 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                 coro = _execute_single_stage(
                     session, task, stage, stage_index_base,
                     prior_outputs, compression, project_memory_store,
-                    repo_context, stage_defs, worktree_path,
+                    repo_context, stage_defs, worktree_path, sandbox_info,
                 )
                 tasks_map[stage.stage_name] = (stage, asyncio.create_task(coro))
 
@@ -386,6 +415,9 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                 task_id=str(task.id),
                 commit_message=f"feat: {task.title}\n\nTask-ID: {task.id}",
             )
+            if branch:
+                task.branch_name = branch
+                await session.commit()
             if branch and settings.WORKTREE_AUTO_PR:
                 pr_body = f"Automated PR for task: {task.title}\n\nTask ID: {task.id}"
                 pr_url = await worktree_mgr.create_pr(
@@ -395,6 +427,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     base_branch=task.project.branch or "main",
                 )
                 if pr_url:
+                    task.pr_url = pr_url
+                    await session.commit()
                     logger.info("PR created for task %s: %s", task.id, pr_url)
         except Exception:
             logger.warning("Worktree commit/push failed for task %s", task.id, exc_info=True)
@@ -404,6 +438,13 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
             await worktree_mgr.cleanup_worktree(str(task.id))
         except Exception:
             logger.warning("Worktree cleanup failed for task %s", task.id, exc_info=True)
+
+    # Clean up sandbox container
+    if sandbox_mgr and sandbox_info:
+        try:
+            await sandbox_mgr.destroy(str(task.id))
+        except Exception:
+            logger.warning("Sandbox cleanup failed for task %s", task.id, exc_info=True)
 
     # Clean up per-task agents
     from app.worker.agents import close_agents_for_task
@@ -422,6 +463,7 @@ async def _execute_single_stage(
     repo_context: Optional[str],
     stage_defs: Dict[str, dict],
     worktree_path: Optional[str] = None,
+    sandbox_info=None,
 ) -> Optional[str]:
     """Execute a single stage with model routing and retry context.
 
@@ -456,16 +498,30 @@ async def _execute_single_stage(
     _CODE_ROLES = {"coding", "test"}
     effective_workdir = worktree_path if (worktree_path and stage.agent_role in _CODE_ROLES) else None
 
+    # Route to sandbox container or in-process execution
+    use_sandbox = sandbox_info is not None and stage.agent_role in _CODE_ROLES
+
     try:
-        output = await execute_stage(
-            session, task, stage, prior_outputs,
-            compressed_outputs=compressed_prior if compressed_prior else None,
-            project_memory=project_memory,
-            repo_context=repo_context,
-            retry_context=retry_context,
-            stage_model=stage_model,
-            workdir_override=effective_workdir,
-        )
+        if use_sandbox:
+            output = await execute_stage_sandboxed(
+                session, task, stage, prior_outputs,
+                sandbox_info=sandbox_info,
+                compressed_outputs=compressed_prior if compressed_prior else None,
+                project_memory=project_memory,
+                repo_context=repo_context,
+                retry_context=retry_context,
+                stage_model=stage_model,
+            )
+        else:
+            output = await execute_stage(
+                session, task, stage, prior_outputs,
+                compressed_outputs=compressed_prior if compressed_prior else None,
+                project_memory=project_memory,
+                repo_context=repo_context,
+                retry_context=retry_context,
+                stage_model=stage_model,
+                workdir_override=effective_workdir,
+            )
         return output
     except Exception as e:
         error_msg = str(e)

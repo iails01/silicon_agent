@@ -322,6 +322,8 @@ class TaskService:
             total_cost_rmb=task.total_cost_rmb,
             created_at=task.created_at,
             completed_at=task.completed_at,
+            branch_name=task.branch_name,
+            pr_url=task.pr_url,
             stages=[TaskStageResponse.model_validate(s) for s in task.stages],
             template_id=task.template_id,
             project_id=task.project_id,

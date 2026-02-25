@@ -1,0 +1,16 @@
+FROM silicon-agent-sandbox:coding
+
+USER root
+
+# Browser testing (optional, increases image size ~800MB)
+RUN npx playwright install-deps 2>/dev/null || true
+RUN npx playwright install chromium 2>/dev/null || true
+
+# Additional test tools
+RUN pip install --no-cache-dir \
+    pytest-asyncio pytest-cov coverage \
+    selenium requests-mock responses
+
+USER agent
+WORKDIR /workspace
+CMD ["python", "/app/agent_server.py", "--port", "9090"]

@@ -506,3 +506,240 @@ async def _get_agent(session: AsyncSession, role: str) -> AgentModel | None:
         select(AgentModel).where(AgentModel.role == role)
     )
     return result.scalar_one_or_none()
+
+
+async def execute_stage_sandboxed(
+    session: AsyncSession,
+    task: TaskModel,
+    stage: TaskStageModel,
+    prior_outputs: List[Dict[str, str]],
+    sandbox_info,
+    compressed_outputs: Optional[List[Dict[str, str]]] = None,
+    project_memory: Optional[str] = None,
+    repo_context: Optional[str] = None,
+    retry_context: Optional[Dict[str, str]] = None,
+    stage_model: Optional[str] = None,
+) -> str:
+    """Execute a stage inside a sandbox container via HTTP.
+
+    The sandbox container runs a full AgentRunner (LLM client + tools).
+    This function builds the prompt, sends it to the container's agent server,
+    and processes the response — handling DB updates and broadcasts as normal.
+    """
+    from app.worker.agents import ROLE_TOOLS, resolve_model_for_role
+    from app.worker.prompts import SYSTEM_PROMPTS, StageContext, build_user_prompt
+    from app.worker.sandbox import get_sandbox_manager
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Mark stage as running
+    stage.status = "running"
+    stage.started_at = now
+    await session.commit()
+
+    # 2. Update agent status
+    agent = await _get_agent(session, stage.agent_role)
+    if agent:
+        agent.status = "running"
+        agent.current_task_id = task.id
+        agent.started_at = now
+        agent.last_active_at = now
+        await session.commit()
+        await _safe_broadcast(AGENT_STATUS_CHANGED, {
+            "role": agent.role,
+            "status": "running",
+            "current_task_id": task.id,
+            "current_stage": stage.stage_name,
+        })
+
+    # 3. Broadcast stage running
+    await _safe_broadcast(TASK_STAGE_UPDATE, {
+        "task_id": task.id,
+        "stage_id": stage.id,
+        "stage_name": stage.stage_name,
+        "status": "running",
+    })
+
+    # 4. Build prompt
+    start_time = time.monotonic()
+    ctx = StageContext(
+        task_title=task.title,
+        task_description=task.description,
+        stage_name=stage.stage_name,
+        agent_role=stage.agent_role,
+        prior_outputs=prior_outputs,
+        compressed_outputs=compressed_outputs,
+        project_memory=project_memory,
+        repo_context=repo_context,
+        retry_context=retry_context,
+    )
+    user_prompt = build_user_prompt(ctx)
+    system_prompt = SYSTEM_PROMPTS.get(stage.agent_role, SYSTEM_PROMPTS["orchestrator"])
+    system_prompt += "\n\n你的工作目录是: /workspace\n所有文件操作请在此目录下进行。"
+
+    resolved_model = resolve_model_for_role(stage.agent_role, stage_model)
+    allowed_tools = list(ROLE_TOOLS.get(stage.agent_role, set()))
+
+    # Resolve skill directories for the role
+    from app.worker.agents import _get_skill_dirs
+    skill_dirs = [f"/skills/{d.name}" for d in _get_skill_dirs(stage.agent_role)]
+
+    max_turns_map = {"spec": 20, "coding": 20, "doc": 20, "test": 20}
+    max_turns = max_turns_map.get(stage.agent_role, 10)
+
+    # 5. Log the request
+    log_service = TaskLogService(session)
+    stage_logs: list[dict[str, Any]] = []
+
+    stage_logs.append({
+        "task_id": str(task.id),
+        "stage_id": str(stage.id),
+        "stage_name": stage.stage_name,
+        "agent_role": stage.agent_role,
+        "event_type": "llm_request_sent",
+        "event_source": "sandbox",
+        "status": "sent",
+        "request_body": {
+            "sandbox": sandbox_info.container_name,
+            "model": resolved_model,
+            "stage": stage.stage_name,
+            "agent_role": stage.agent_role,
+            "prompt": user_prompt,
+        },
+        "response_body": None,
+        "command": None,
+        "command_args": None,
+        "workspace": "/workspace",
+        "duration_ms": None,
+        "result": None,
+        "missing_fields": [],
+    })
+
+    # 6. Send to sandbox container
+    sandbox_mgr = get_sandbox_manager()
+    sandbox_result = await sandbox_mgr.execute_stage(
+        sandbox_info,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=resolved_model,
+        max_turns=max_turns,
+        enable_tools=True,
+        allowed_tools=allowed_tools,
+        skill_dirs=skill_dirs,
+        workdir="/workspace",
+        timeout=int(settings.WORKER_STAGE_TIMEOUT),
+    )
+
+    elapsed = time.monotonic() - start_time
+
+    if sandbox_result.error:
+        stage_logs.append({
+            "task_id": str(task.id),
+            "stage_id": str(stage.id),
+            "stage_name": stage.stage_name,
+            "agent_role": stage.agent_role,
+            "event_type": "llm_response_received",
+            "event_source": "sandbox",
+            "status": "failed",
+            "request_body": None,
+            "response_body": {"error": sandbox_result.error},
+            "command": None,
+            "command_args": None,
+            "workspace": "/workspace",
+            "duration_ms": round(elapsed * 1000, 2),
+            "result": None,
+            "missing_fields": [],
+        })
+        await log_service.append_logs(stage_logs)
+        await session.commit()
+        raise RuntimeError(f"Sandbox execution failed: {sandbox_result.error}")
+
+    output = sandbox_result.text_content
+    total_tokens = sandbox_result.total_tokens
+
+    # Log tool calls from sandbox
+    for tc in sandbox_result.tool_calls:
+        stage_logs.append({
+            "task_id": str(task.id),
+            "stage_id": str(stage.id),
+            "stage_name": stage.stage_name,
+            "agent_role": stage.agent_role,
+            "event_type": "tool_call_executed",
+            "event_source": "sandbox_tool",
+            "status": tc.get("status", "success"),
+            "request_body": None,
+            "response_body": None,
+            "command": tc.get("tool_name", ""),
+            "command_args": tc.get("args", {}),
+            "workspace": tc.get("args", {}).get("cwd", "/workspace"),
+            "duration_ms": tc.get("duration_ms"),
+            "result": tc.get("result_preview", ""),
+            "missing_fields": [],
+        })
+
+    # Log success response
+    stage_logs.append({
+        "task_id": str(task.id),
+        "stage_id": str(stage.id),
+        "stage_name": stage.stage_name,
+        "agent_role": stage.agent_role,
+        "event_type": "llm_response_received",
+        "event_source": "sandbox",
+        "status": "success",
+        "request_body": None,
+        "response_body": {
+            "content": output[:2000] if output else "",
+            "total_tokens": total_tokens,
+            "tool_calls_count": len(sandbox_result.tool_calls),
+        },
+        "command": None,
+        "command_args": None,
+        "workspace": "/workspace",
+        "duration_ms": round(elapsed * 1000, 2),
+        "result": None,
+        "missing_fields": [],
+    })
+
+    # 7. Update stage as completed
+    stage.status = "completed"
+    stage.completed_at = datetime.now(timezone.utc)
+    stage.duration_seconds = round(elapsed, 2)
+    stage.tokens_used = total_tokens
+    stage.output_summary = output
+    await log_service.append_logs(stage_logs)
+    await session.commit()
+
+    # 8. Update task total tokens and cost
+    task.total_tokens += total_tokens
+    cost = total_tokens * settings.CB_TOKEN_PRICE_PER_1K / 1000
+    task.total_cost_rmb += cost
+    await session.commit()
+
+    # 9. Broadcast stage completed
+    await _safe_broadcast(TASK_STAGE_UPDATE, {
+        "task_id": task.id,
+        "stage_id": stage.id,
+        "stage_name": stage.stage_name,
+        "status": "completed",
+        "duration_seconds": stage.duration_seconds,
+        "tokens_used": total_tokens,
+    })
+
+    # 10. Reset agent to idle
+    if agent:
+        agent.status = "idle"
+        agent.current_task_id = None
+        agent.last_active_at = datetime.now(timezone.utc)
+        await session.commit()
+        await _safe_broadcast(AGENT_STATUS_CHANGED, {
+            "role": agent.role,
+            "status": "idle",
+            "current_task_id": None,
+            "current_stage": None,
+        })
+
+    logger.info(
+        "Stage %s completed via sandbox: %.1fs, %d tokens, %d tool calls",
+        stage.stage_name, elapsed, total_tokens, len(sandbox_result.tool_calls),
+    )
+    return output
