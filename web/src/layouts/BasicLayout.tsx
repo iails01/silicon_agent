@@ -43,7 +43,7 @@ const BasicLayout: React.FC = () => {
 
   return (
     <ProLayout
-      title="SITC Agent Platform"
+      title="Silicon Agent"
       layout="mix"
       fixSiderbar
       location={{ pathname: location.pathname }}

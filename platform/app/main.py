@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="SITC Agent Management Platform",
+    title="Silicon Agent Platform",
     description="Backend API for managing AI agent workforce",
     version="0.1.0",
     lifespan=lifespan,

@@ -1,7 +1,7 @@
 [project]
 name = "agent-platform"
 version = "0.1.0"
-description = "SITC Agent Management Platform Backend"
+description = "Silicon Agent Platform Backend"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
