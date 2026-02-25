@@ -53,6 +53,9 @@ async def start_worker() -> None:
     # Recover tasks stuck in running/claimed from a previous crash
     await _recover_stale_tasks()
 
+    # Prune orphaned worktrees left over from previous crashes
+    await _prune_stale_worktrees()
+
     _running = True
     _task = asyncio.create_task(_poll_loop())
     logger.info("Worker started (poll_interval=%.1fs)", settings.WORKER_POLL_INTERVAL)
@@ -75,6 +78,29 @@ async def _recover_stale_tasks() -> None:
                 )
     except Exception:
         logger.exception("Failed to recover stale tasks")
+
+
+async def _prune_stale_worktrees() -> None:
+    """Prune orphaned worktrees on startup (leftover from crashes/restarts)."""
+    if not settings.WORKTREE_ENABLED:
+        return
+    try:
+        async with async_session_factory() as session:
+            # Find all projects with repo_local_path to know which repos to prune
+            from app.models.project import ProjectModel
+            result = await session.execute(
+                select(ProjectModel.repo_local_path)
+                .where(ProjectModel.repo_local_path.isnot(None))
+            )
+            repo_paths = [r for (r,) in result.all() if r]
+
+        for repo_path in repo_paths:
+            mgr = get_worktree_manager(repo_path)
+            cleaned = await mgr.prune_all_stale()
+            if cleaned:
+                logger.info("Pruned %d orphan worktrees for repo %s", cleaned, repo_path)
+    except Exception:
+        logger.warning("Failed to prune stale worktrees on startup", exc_info=True)
 
 
 async def stop_worker() -> None:

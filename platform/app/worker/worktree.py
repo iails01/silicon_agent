@@ -32,6 +32,28 @@ async def _run(cmd: str, cwd: Optional[str] = None) -> tuple[int, str, str]:
     return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
 
 
+async def _run_with_retry(
+    cmd: str,
+    cwd: Optional[str] = None,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+) -> tuple[int, str, str]:
+    """Run a shell command with exponential backoff retry for transient failures."""
+    last_rc, last_out, last_err = 0, "", ""
+    for attempt in range(max_retries):
+        last_rc, last_out, last_err = await _run(cmd, cwd=cwd)
+        if last_rc == 0:
+            return last_rc, last_out, last_err
+        if attempt < max_retries - 1:
+            delay = base_delay * (2 ** attempt)
+            logger.warning(
+                "Git command failed (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1, max_retries, delay, last_err[:200],
+            )
+            await asyncio.sleep(delay)
+    return last_rc, last_out, last_err
+
+
 def _sanitize_branch_name(task_id: str, task_title: str) -> str:
     """Generate a valid git branch name from task info."""
     # Use first 8 chars of task_id + sanitized title
@@ -68,8 +90,8 @@ class WorktreeManager:
             logger.info("Worktree already exists for task %s: %s", task_id, worktree_path)
             return str(worktree_path)
 
-        # Fetch latest from remote (best-effort)
-        await _run("git fetch origin", cwd=str(self.repo_path))
+        # Fetch latest from remote (best-effort, with retry)
+        await _run_with_retry("git fetch origin", cwd=str(self.repo_path))
 
         # Create worktree with new branch from base
         rc, out, err = await _run(
@@ -97,10 +119,12 @@ class WorktreeManager:
         return str(worktree_path)
 
     async def cleanup_worktree(self, task_id: str) -> None:
-        """Remove a task's worktree and optionally its branch."""
+        """Remove a task's worktree and its stale git refs."""
         worktree_path = self.base_dir / task_id
 
         if not worktree_path.exists():
+            # Directory gone but git refs might still exist — prune anyway
+            await _run("git worktree prune", cwd=str(self.repo_path))
             return
 
         # Remove worktree via git
@@ -116,6 +140,41 @@ class WorktreeManager:
         await _run("git worktree prune", cwd=str(self.repo_path))
 
         logger.info("Cleaned up worktree for task %s", task_id)
+
+    async def prune_all_stale(self) -> int:
+        """Remove orphaned worktree directories and prune stale git refs.
+
+        Scans WORKTREE_BASE_DIR for leftover directories and removes them.
+        Returns the number of orphans cleaned up.
+        """
+        if not self.base_dir.exists():
+            return 0
+
+        # Get list of valid worktrees from git
+        rc, out, _ = await _run("git worktree list --porcelain", cwd=str(self.repo_path))
+        valid_paths: set[str] = set()
+        if rc == 0:
+            for line in out.splitlines():
+                if line.startswith("worktree "):
+                    valid_paths.add(line[len("worktree "):].strip())
+
+        cleaned = 0
+        for entry in self.base_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            if str(entry) in valid_paths:
+                continue
+            # Orphaned directory — not tracked by git worktree list
+            logger.info("Removing orphaned worktree directory: %s", entry)
+            shutil.rmtree(entry, ignore_errors=True)
+            cleaned += 1
+
+        # Prune any stale git refs
+        await _run("git worktree prune", cwd=str(self.repo_path))
+
+        if cleaned:
+            logger.info("Pruned %d orphaned worktree(s)", cleaned)
+        return cleaned
 
     async def commit_and_push(
         self, task_id: str, commit_message: str,
@@ -158,12 +217,12 @@ class WorktreeManager:
         if rc != 0:
             return None
 
-        rc, _, err = await _run(
+        rc, _, err = await _run_with_retry(
             f"git push -u origin {branch}",
             cwd=cwd,
         )
         if rc != 0:
-            logger.error("git push failed for task %s: %s", task_id, err)
+            logger.error("git push failed for task %s after retries: %s", task_id, err)
             return None
 
         logger.info("Committed and pushed for task %s on branch %s", task_id, branch)
@@ -182,12 +241,12 @@ class WorktreeManager:
             return None
 
         cwd = str(worktree_path)
-        rc, out, err = await _run(
+        rc, out, err = await _run_with_retry(
             f'gh pr create --title "{title}" --body "{body}" --base {base_branch}',
             cwd=cwd,
         )
         if rc != 0:
-            logger.error("gh pr create failed for task %s: %s", task_id, err)
+            logger.error("gh pr create failed for task %s after retries: %s", task_id, err)
             return None
 
         pr_url = out.strip()
