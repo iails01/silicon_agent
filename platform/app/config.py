@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # GitHub integration (optional, raises rate limit)
     GITHUB_TOKEN: str = ""
 
+    # GitHub Enterprise integration (e.g. scm.starbucks.com)
+    GHE_BASE_URL: str = ""       # e.g. "https://scm.starbucks.com/api/v3"
+    GHE_TOKEN: str = ""          # Personal access token for the GHE instance
+
     # ROI benchmark: estimated manual effort per task
     ESTIMATED_HOURS_PER_TASK: float = 8.0
     HOURLY_RATE_RMB: float = 150.0

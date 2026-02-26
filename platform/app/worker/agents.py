@@ -303,6 +303,13 @@ def _create_runner(
         # SkillKit's AgentConfig.from_env already sets model internally.
         # Override after creation to avoid duplicate keyword collisions.
         base.config.model = model
+
+    # Disable MiniMax-specific reasoning_split for non-MiniMax models (e.g. Gemini).
+    # SkillKit defaults enable_reasoning=True which injects extra_body={"reasoning_split": True}
+    # into every API call — Gemini returns HTTP 400 for this unrecognized field.
+    effective_model = (model or getattr(base.config, "model", "") or "").lower()
+    if "minimax" not in effective_model:
+        base.config.enable_reasoning = False
     runner = SandboxedAgentRunner(
         engine=base.engine,
         config=base.config,
