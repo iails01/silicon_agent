@@ -235,16 +235,26 @@ class WorktreeManager:
         body: str,
         base_branch: str = "main",
     ) -> Optional[str]:
-        """Create a GitHub PR via gh CLI. Returns PR URL or None."""
+        """Create a PR via gh CLI. Supports both github.com and GitHub Enterprise."""
         worktree_path = self.base_dir / task_id
         if not worktree_path.exists():
             return None
 
         cwd = str(worktree_path)
-        rc, out, err = await _run_with_retry(
-            f'gh pr create --title "{title}" --body "{body}" --base {base_branch}',
-            cwd=cwd,
-        )
+        cmd = f'gh pr create --title "{title}" --body "{body}" --base {base_branch}'
+
+        # For GitHub Enterprise, set GH_HOST so `gh` CLI targets the right server
+        if settings.GHE_BASE_URL:
+            from urllib.parse import urlparse
+            ghe_host = urlparse(settings.GHE_BASE_URL).hostname or ""
+            if ghe_host:
+                cmd = (
+                    f'GH_HOST={ghe_host} '
+                    f'GH_ENTERPRISE_TOKEN={settings.GHE_TOKEN} '
+                    f'{cmd}'
+                )
+
+        rc, out, err = await _run_with_retry(cmd, cwd=cwd)
         if rc != 0:
             logger.error("gh pr create failed for task %s after retries: %s", task_id, err)
             return None

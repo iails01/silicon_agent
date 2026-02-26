@@ -122,9 +122,12 @@ class ProjectService:
         if not project.repo_url:
             raise ValueError("Project has no repo_url configured")
 
-        from app.services.repo_analyzer import analyze_repo
+        from app.services.repo_analyzer import analyze_repo, RepoNotFoundError
 
-        ctx = await analyze_repo(project.repo_url, branch=project.branch)
+        try:
+            ctx = await analyze_repo(project.repo_url, branch=project.branch)
+        except RepoNotFoundError as e:
+            raise ValueError(str(e))
 
         now = datetime.now(timezone.utc)
         project.tech_stack = ctx.tech_stack
