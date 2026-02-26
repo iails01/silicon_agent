@@ -1,9 +1,12 @@
 ---
 name: debug-code
+display_name: "问题调试"
 description: 分析错误信息和代码逻辑，定位并修复 bug
+layer: L2
 metadata:
   emoji: "🐛"
   tags: ["coding", "debug", "fix"]
+  applicable_roles: ["coding"]
 ---
 
 # 调试与错误修复

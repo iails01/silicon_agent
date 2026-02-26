@@ -1,9 +1,12 @@
 ---
 name: parse-requirements
+display_name: "需求解析"
 description: 将用户的自然语言需求解析为结构化的任务描述，拆分子任务并确定优先级
+layer: L1
 metadata:
   emoji: "📋"
   tags: ["orchestrator", "requirements", "planning"]
+  applicable_roles: ["orchestrator"]
 ---
 
 # 需求解析与结构化

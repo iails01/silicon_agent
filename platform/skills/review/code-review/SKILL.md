@@ -1,9 +1,12 @@
 ---
 name: code-review
+display_name: "代码审查"
 description: 代码质量审查，检查可读性、可维护性、性能和最佳实践
+layer: L2
 metadata:
   emoji: "📝"
   tags: ["review", "code-quality", "best-practices"]
+  applicable_roles: ["review"]
 ---
 
 # 代码质量审查

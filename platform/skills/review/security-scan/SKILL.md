@@ -1,9 +1,12 @@
 ---
 name: security-scan
+display_name: "安全扫描"
 description: 基于 OWASP Top 10 对代码进行安全扫描，识别潜在漏洞
+layer: L2
 metadata:
   emoji: "🛡️"
   tags: ["review", "security", "owasp"]
+  applicable_roles: ["review"]
 ---
 
 # OWASP 安全扫描

@@ -30,11 +30,14 @@ def _parse_skill_md(path: Path) -> Optional[Dict]:
     meta: Dict = {}
     for line in front.splitlines():
         line = line.strip()
+        if line.startswith("metadata:") or line.startswith("emoji:"):
+            continue
         if ":" in line:
             key, _, val = line.partition(":")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
-            meta[key] = val
+            if key and val:
+                meta[key] = val
 
     name = meta.get("name")
     if not name:
@@ -47,10 +50,20 @@ def _parse_skill_md(path: Path) -> Optional[Dict]:
         raw = tags_match.group(1)
         tags = [t.strip().strip('"').strip("'") for t in raw.split(",")]
 
+    # Parse applicable_roles from metadata block
+    roles: List[str] = []
+    roles_match = re.search(r'applicable_roles:\s*\[(.*?)\]', front)
+    if roles_match:
+        raw = roles_match.group(1)
+        roles = [r.strip().strip('"').strip("'") for r in raw.split(",")]
+
     return {
         "name": name,
+        "display_name": meta.get("display_name", ""),
         "description": meta.get("description", ""),
+        "layer": meta.get("layer", "L1"),
         "tags": tags,
+        "applicable_roles": roles,
         "content": body,
         "git_path": str(path.relative_to(_SKILLS_ROOT.parent)),
     }
@@ -64,10 +77,14 @@ async def sync_skills_from_filesystem(session: AsyncSession) -> Dict[str, str]:
 
     results: Dict[str, str] = {}
 
+    all_roles = ["orchestrator", "spec", "coding", "test", "review", "smoke", "doc"]
+
     for role_dir in sorted(_SKILLS_ROOT.iterdir()):
-        if not role_dir.is_dir() or role_dir.name == "shared":
+        if not role_dir.is_dir():
             continue
         role = role_dir.name
+        is_shared = role == "shared"
+
         for skill_dir in sorted(role_dir.iterdir()):
             if not skill_dir.is_dir():
                 continue
@@ -81,6 +98,18 @@ async def sync_skills_from_filesystem(session: AsyncSession) -> Dict[str, str]:
                 continue
 
             skill_name = parsed["name"]
+            # Determine applicable roles: frontmatter > shared (all) > directory name
+            applicable_roles = (
+                parsed["applicable_roles"]
+                if parsed["applicable_roles"]
+                else all_roles if is_shared else [role]
+            )
+            display_name = (
+                parsed["display_name"]
+                or parsed["description"][:100]
+                or skill_name
+            )
+
             result = await session.execute(
                 select(SkillModel).where(SkillModel.name == skill_name)
             )
@@ -89,11 +118,11 @@ async def sync_skills_from_filesystem(session: AsyncSession) -> Dict[str, str]:
             if existing is None:
                 skill = SkillModel(
                     name=skill_name,
-                    display_name=parsed["description"][:200] if parsed["description"] else skill_name,
+                    display_name=display_name,
                     description=parsed["description"],
-                    layer="L1",
+                    layer=parsed["layer"],
                     tags=parsed["tags"],
-                    applicable_roles=[role],
+                    applicable_roles=applicable_roles,
                     content=parsed["content"],
                     git_path=parsed["git_path"],
                     status="active",
@@ -101,13 +130,26 @@ async def sync_skills_from_filesystem(session: AsyncSession) -> Dict[str, str]:
                 session.add(skill)
                 results[skill_name] = "created"
             else:
-                # Update content if changed
+                changed = False
                 if existing.content != parsed["content"]:
                     existing.content = parsed["content"]
+                    changed = True
+                if existing.display_name != display_name:
+                    existing.display_name = display_name
+                    changed = True
+                if existing.description != parsed["description"]:
+                    existing.description = parsed["description"]
+                    changed = True
+                if existing.layer != parsed["layer"]:
+                    existing.layer = parsed["layer"]
+                    changed = True
+                if existing.applicable_roles != applicable_roles:
+                    existing.applicable_roles = applicable_roles
+                    changed = True
+                if existing.git_path != parsed["git_path"]:
                     existing.git_path = parsed["git_path"]
-                    results[skill_name] = "updated"
-                else:
-                    results[skill_name] = "unchanged"
+                    changed = True
+                results[skill_name] = "updated" if changed else "unchanged"
 
     await session.commit()
     created = sum(1 for v in results.values() if v == "created")

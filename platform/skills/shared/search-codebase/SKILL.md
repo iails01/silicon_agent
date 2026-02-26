@@ -1,9 +1,12 @@
 ---
 name: search-codebase
+display_name: "代码搜索"
 description: 搜索代码库中的文件、函数、类或关键字，快速定位相关代码
+layer: L1
 metadata:
   emoji: "🔍"
   tags: ["shared", "search", "codebase"]
+  applicable_roles: ["orchestrator", "spec", "coding", "test", "review", "smoke", "doc"]
 ---
 
 # 搜索代码库

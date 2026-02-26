@@ -1,9 +1,12 @@
 ---
 name: design-api
+display_name: "API设计"
 description: 设计 RESTful API 接口，包括路由、请求/响应格式和错误码定义
+layer: L1
 metadata:
   emoji: "🌐"
   tags: ["spec", "api", "design"]
+  applicable_roles: ["spec"]
 ---
 
 # REST API 接口设计

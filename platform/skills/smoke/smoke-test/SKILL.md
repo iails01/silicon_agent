@@ -1,9 +1,12 @@
 ---
 name: smoke-test
+display_name: "冒烟测试"
 description: 设计冒烟测试方案，验证核心功能路径是否可用
+layer: L2
 metadata:
   emoji: "💨"
   tags: ["smoke", "testing", "verification"]
+  applicable_roles: ["smoke"]
 ---
 
 # 冒烟测试方案设计

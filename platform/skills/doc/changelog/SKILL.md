@@ -1,9 +1,12 @@
 ---
 name: changelog
+display_name: "变更日志"
 description: 根据代码变更生成结构化的变更日志
+layer: L1
 metadata:
   emoji: "📄"
   tags: ["doc", "changelog", "release"]
+  applicable_roles: ["doc"]
 ---
 
 # 变更日志生成

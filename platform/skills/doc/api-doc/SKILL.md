@@ -1,9 +1,12 @@
 ---
 name: api-doc
+display_name: "API文档"
 description: 根据代码自动生成 API 文档，包括接口说明、参数和示例
+layer: L1
 metadata:
   emoji: "📖"
   tags: ["doc", "api", "documentation"]
+  applicable_roles: ["doc"]
 ---
 
 # API 文档生成

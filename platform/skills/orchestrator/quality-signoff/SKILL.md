@@ -1,9 +1,12 @@
 ---
 name: quality-signoff
+display_name: "质量签收"
 description: 评估各阶段产出质量，决定是否通过或打回重做
+layer: L2
 metadata:
   emoji: "✅"
   tags: ["orchestrator", "quality", "signoff"]
+  applicable_roles: ["orchestrator"]
 ---
 
 # 质量签收评估

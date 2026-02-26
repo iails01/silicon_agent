@@ -1,9 +1,12 @@
 ---
 name: unit-test
+display_name: "单元测试"
 description: 为指定模块或函数生成单元测试，覆盖正常路径和边界条件
+layer: L1
 metadata:
   emoji: "🧪"
   tags: ["test", "unit-test", "testing"]
+  applicable_roles: ["test"]
 ---
 
 # 单元测试生成

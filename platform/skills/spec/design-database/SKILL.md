@@ -1,9 +1,12 @@
 ---
 name: design-database
+display_name: "数据库设计"
 description: 设计数据库 schema，包括表结构、字段类型、索引和关联关系
+layer: L1
 metadata:
   emoji: "🗄️"
   tags: ["spec", "database", "schema"]
+  applicable_roles: ["spec"]
 ---
 
 # 数据库 Schema 设计

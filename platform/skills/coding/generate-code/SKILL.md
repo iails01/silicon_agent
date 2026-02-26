@@ -1,9 +1,12 @@
 ---
 name: generate-code
+display_name: "代码生成"
 description: 根据设计文档生成代码，遵循项目规范和文件结构约定
+layer: L1
 metadata:
   emoji: "💻"
   tags: ["coding", "generate", "implementation"]
+  applicable_roles: ["coding"]
 ---
 
 # 代码生成

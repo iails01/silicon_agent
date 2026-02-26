@@ -1,9 +1,12 @@
 ---
 name: integration-test
+display_name: "集成测试"
 description: 生成集成测试，验证多个模块之间的协作是否正确
+layer: L1
 metadata:
   emoji: "🔗"
   tags: ["test", "integration-test", "testing"]
+  applicable_roles: ["test"]
 ---
 
 # 集成测试生成

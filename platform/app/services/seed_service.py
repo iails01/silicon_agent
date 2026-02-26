@@ -11,78 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditLogModel
 from app.models.gate import HumanGateModel
-from app.models.skill import SkillModel
 from app.models.task import TaskModel, TaskStageModel
 from app.models.template import TaskTemplateModel
 
 logger = logging.getLogger(__name__)
-
-SEED_SKILLS = [
-    {
-        "name": "code_generation",
-        "display_name": "代码生成",
-        "description": "根据需求描述自动生成代码实现，支持多语言",
-        "layer": "L1",
-        "tags": ["coding", "generation"],
-        "applicable_roles": ["coding"],
-    },
-    {
-        "name": "unit_test_gen",
-        "display_name": "单元测试生成",
-        "description": "自动生成单元测试代码，覆盖主要逻辑分支",
-        "layer": "L1",
-        "tags": ["testing", "generation"],
-        "applicable_roles": ["test"],
-    },
-    {
-        "name": "code_review",
-        "display_name": "代码审查",
-        "description": "静态分析代码质量，检查安全漏洞和最佳实践",
-        "layer": "L2",
-        "tags": ["review", "security"],
-        "applicable_roles": ["review"],
-    },
-    {
-        "name": "spec_analysis",
-        "display_name": "需求分析",
-        "description": "解析自然语言需求，生成结构化技术方案",
-        "layer": "L1",
-        "tags": ["spec", "analysis"],
-        "applicable_roles": ["spec", "orchestrator"],
-    },
-    {
-        "name": "doc_generation",
-        "display_name": "文档生成",
-        "description": "自动生成API文档、README和变更日志",
-        "layer": "L1",
-        "tags": ["documentation"],
-        "applicable_roles": ["doc"],
-    },
-    {
-        "name": "smoke_test",
-        "display_name": "冒烟测试",
-        "description": "自动执行端到端冒烟测试验证基本功能",
-        "layer": "L2",
-        "tags": ["testing", "e2e"],
-        "applicable_roles": ["smoke"],
-    },
-    {
-        "name": "git_operations",
-        "display_name": "Git操作",
-        "description": "自动执行git分支管理、commit、PR创建",
-        "layer": "L3",
-        "tags": ["git", "devops"],
-        "applicable_roles": ["coding", "orchestrator"],
-    },
-    {
-        "name": "dependency_check",
-        "display_name": "依赖检查",
-        "description": "扫描项目依赖安全漏洞和版本兼容性",
-        "layer": "L2",
-        "tags": ["security", "dependencies"],
-        "applicable_roles": ["review", "smoke"],
-    },
-]
 
 SEED_AUDIT_LOGS = [
     {"agent_role": "orchestrator", "action_type": "task_created", "risk_level": "low", "action_detail": {"task": "实现用户登录模块", "template": "full_pipeline"}},
@@ -106,26 +38,11 @@ SEED_AUDIT_LOGS = [
 async def seed_demo_data(session: AsyncSession) -> None:
     """Seed Skills, Gates, Audit logs, and sample tasks for demo."""
 
-    # Check if already seeded
-    skill_count = await session.execute(select(SkillModel).limit(1))
-    if skill_count.scalar_one_or_none() is not None:
+    # Check if already seeded (use TaskModel as marker — skills are synced from filesystem)
+    task_count = await session.execute(select(TaskModel).limit(1))
+    if task_count.scalar_one_or_none() is not None:
         logger.info("Demo data already seeded, skipping")
         return
-
-    # --- Seed Skills ---
-    for skill_data in SEED_SKILLS:
-        skill = SkillModel(
-            name=skill_data["name"],
-            display_name=skill_data["display_name"],
-            description=skill_data["description"],
-            layer=skill_data["layer"],
-            tags=skill_data["tags"],
-            applicable_roles=skill_data["applicable_roles"],
-            status="active",
-            version="1.0.0",
-        )
-        session.add(skill)
-    logger.info("Seeded %d skills", len(SEED_SKILLS))
 
     # --- Seed sample tasks with stages ---
     now = datetime.now(timezone.utc)
