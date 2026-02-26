@@ -77,6 +77,11 @@ _CONTENT_HINTS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+class RepoNotFoundError(Exception):
+    """Raised when the target repository or branch cannot be found via the API."""
+    pass
+
+
 @dataclass
 class RepoContext:
     readme_summary: str = ""
@@ -184,15 +189,30 @@ async def _fetch_tree(
             params={"recursive": "1"},
             headers=headers,
         )
+        if resp.status_code == 404:
+            raise RepoNotFoundError(
+                f"Repository '{owner}/{repo}' or branch '{branch}' not found "
+                f"(API: {api_base})"
+            )
+        if resp.status_code == 401 or resp.status_code == 403:
+            raise RepoNotFoundError(
+                f"Access denied for '{owner}/{repo}' — check your Git token "
+                f"(HTTP {resp.status_code}, API: {api_base})"
+            )
         if resp.status_code != 200:
-            return "", []
+            raise RepoNotFoundError(
+                f"Failed to access '{owner}/{repo}': HTTP {resp.status_code}"
+            )
         data = resp.json()
         items = data.get("tree", [])
+    except RepoNotFoundError:
+        raise
     except Exception:
         logger.warning("Failed to fetch tree for %s/%s", owner, repo, exc_info=True)
         return "", []
 
     root_files: list[str] = []
+    tech_files: list[str] = []  # full paths to tech-relevant files (any depth)
     lines: list[str] = []
 
     for item in items:
@@ -209,17 +229,25 @@ async def _fetch_tree(
         if depth > max_depth:
             continue
 
-        # Collect root-level files for tech inference
+        filename = parts[-1]
+
+        # Collect root-level files for file-based tech inference
         if depth == 1 and item_type == "blob":
-            root_files.append(parts[0])
+            root_files.append(filename)
+
+        # Collect tech-relevant files at any depth for content-based inference
+        if item_type == "blob" and filename in _CONTENT_HINTS:
+            tech_files.append(path)
+        # Also match file-based rules at any depth
+        if item_type == "blob" and filename in _TECH_RULES:
+            root_files.append(filename)  # treat as if root for rule matching
 
         indent = "  " * (depth - 1)
-        name = parts[-1]
         suffix = "/" if item_type == "tree" else ""
-        lines.append(f"{indent}{name}{suffix}")
+        lines.append(f"{indent}{filename}{suffix}")
 
     tree_str = "\n".join(lines[:200])  # Cap at 200 lines
-    return tree_str, root_files
+    return tree_str, root_files, tech_files
 
 
 async def _fetch_file_content(
@@ -291,20 +319,27 @@ async def analyze_repo(repo_url: str, branch: str = "main") -> RepoContext:
     ) as client:
         # Fetch README and tree in parallel
         readme = await _fetch_readme(client, api_base, owner, repo, headers)
-        tree_str, root_files = await _fetch_tree(
+        tree_str, root_files, tech_files = await _fetch_tree(
             client, api_base, owner, repo, branch, headers,
         )
 
-        # Fetch key files for tech stack inference
-        files_to_check = [f for f in root_files if f in _CONTENT_HINTS]
+        # Fetch tech-relevant files for content-based inference (any depth)
         file_contents: dict[str, str] = {}
-        for filename in files_to_check:
+        for filepath in tech_files:
             content = await _fetch_file_content(
-                client, api_base, owner, repo, filename, branch, headers,
+                client, api_base, owner, repo, filepath, branch, headers,
             )
             if content:
-                file_contents[filename] = content
+                # Key by basename so _infer_tech_stack matching works
+                basename = filepath.split("/")[-1]
+                # Merge: if multiple files match, concatenate content
+                if basename in file_contents:
+                    file_contents[basename] += "\n" + content
+                else:
+                    file_contents[basename] = content
 
+    # Deduplicate root_files
+    root_files = list(dict.fromkeys(root_files))
     tech_stack = _infer_tech_stack(root_files, file_contents)
 
     return RepoContext(
