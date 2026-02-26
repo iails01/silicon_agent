@@ -1,10 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline } from 'antd';
+import { useQuery } from '@tanstack/react-query';
+import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline, Tabs } from 'antd';
 import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined } from '@ant-design/icons';
 import { useTask, useCancelTask, useRetryTask } from '@/hooks/useTasks';
 import { useStageLogStore } from '@/stores/stageLogStore';
+import { listTaskLogs } from '@/services/taskLogApi';
 import PipelineView from '@/components/PipelineView';
+import ReActTimeline from '@/components/ReActTimeline';
 import { STAGE_NAMES } from '@/utils/constants';
 import { formatTimestamp, formatTokens, formatCost, formatDuration } from '@/utils/formatters';
 
@@ -82,6 +85,28 @@ const StageLiveLog: React.FC<{ stageId: string }> = ({ stageId }) => {
   );
 };
 
+const StageReActDetails: React.FC<{ taskId: string; stageId: string; stageName: string; isRunning: boolean }> = ({ taskId, stageId, stageName, isRunning }) => {
+  const liveLogs = useStageLogStore((s) => s.logsByStage[stageId] ?? EMPTY_LOGS);
+
+  // Fetch historical logs for this stage
+  const { data, isLoading } = useQuery({
+    queryKey: ['taskLogs', taskId, stageName],
+    queryFn: () => listTaskLogs({ task: taskId, stage: stageName, page_size: 500 }),
+    enabled: !!taskId && !!stageName,
+    refetchInterval: isRunning ? 3000 : false, // Poll if still running to get the latest DB state
+  });
+
+  const historicalLogs = data?.items || [];
+
+  // Merge: Since our ReActTimeline handles all event types natively based on correlation mapping,
+  // we mainly rely on historicalLogs (DB state) which is richer.
+  // The 'liveLogs' from WebSocket are simpler StageLogPayloads. 
+  // In a robust implementation, we'd map WS to TaskLogEvents, but since we poll when running,
+  // passing historicalLogs covers most of the ReAct rendering nicely.
+
+  return <ReActTimeline logs={historicalLogs} loading={isLoading} />;
+};
+
 const TaskDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -154,35 +179,54 @@ const TaskDetail: React.FC = () => {
                   </Space>
                 }
               >
-                {stage.output_summary ? (
-                  <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
-                    {stage.output_summary}
-                  </Typography.Paragraph>
-                ) : stage.error_message ? (
-                  <div>
-                    <Typography.Text type="danger">{stage.error_message}</Typography.Text>
-                    {task.status === 'failed' && (
-                      <div style={{ marginTop: 12 }}>
-                        <Button
-                          type="primary"
-                          size="small"
-                          icon={<ReloadOutlined />}
-                          onClick={async () => {
-                            await retryTask.mutateAsync(task.id);
-                            message.success('任务已重新提交，将从失败阶段继续执行');
-                          }}
-                          loading={retryTask.isPending}
-                        >
-                          从此阶段重试
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ) : stage.status === 'running' ? (
-                  <StageLiveLog stageId={stage.id} />
-                ) : (
-                  <Empty description="暂无产出" />
-                )}
+                <Tabs
+                  defaultActiveKey="react"
+                  items={[
+                    {
+                      key: 'react',
+                      label: '推演过程 (ReAct Track)',
+                      children: (
+                        <StageReActDetails
+                          taskId={task.id}
+                          stageId={stage.id}
+                          stageName={stage.stage_name}
+                          isRunning={stage.status === 'running'}
+                        />
+                      ),
+                    },
+                    {
+                      key: 'output',
+                      label: '阶段产出结果',
+                      children: stage.output_summary ? (
+                        <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', padding: 16 }}>
+                          {stage.output_summary}
+                        </Typography.Paragraph>
+                      ) : stage.error_message ? (
+                        <div style={{ padding: 16 }}>
+                          <Typography.Text type="danger">{stage.error_message}</Typography.Text>
+                          {task.status === 'failed' && (
+                            <div style={{ marginTop: 12 }}>
+                              <Button
+                                type="primary"
+                                size="small"
+                                icon={<ReloadOutlined />}
+                                onClick={async () => {
+                                  await retryTask.mutateAsync(task.id);
+                                  message.success('任务已重新提交，将从失败阶段继续执行');
+                                }}
+                                loading={retryTask.isPending}
+                              >
+                                从此阶段重试
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <Empty description="暂无产出摘要 (任务可能正在运行或未生成摘要)" style={{ marginTop: 32 }} />
+                      ),
+                    },
+                  ]}
+                />
               </Collapse.Panel>
             ))}
           </Collapse>

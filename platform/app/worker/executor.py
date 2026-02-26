@@ -595,14 +595,46 @@ async def execute_stage(
             )
             try:
                 chat_kwargs = _chat_kwargs_for_runner(runner, runtime_overrides)
-                response = await asyncio.wait_for(
-                    runner.chat(user_prompt, reset=True, **chat_kwargs),
+
+                async def _consume_stream() -> str:
+                    full_text = ""
+                    async for event in runner.chat_stream_events(user_prompt, reset=True, **chat_kwargs):
+                        chunk = ""
+                        if event.type == "text_delta" or event.type == "thinking_delta":
+                            chunk = event.content or ""
+                        elif event.type == "thinking_start":
+                            chunk = "<thought>\n"
+                        elif event.type == "thinking_end":
+                            chunk = "\n</thought>\n\n"
+
+                        if chunk:
+                            full_text += chunk
+                            if event.turn is not None and chat_correlation:
+                                correlation = f"{chat_correlation}:turn:{event.turn}"
+                                run_info = turn_runs.get(correlation)
+                                if run_info:
+                                    await _safe_broadcast(
+                                        TASK_LOG_STREAM_UPDATE,
+                                        {
+                                            "task_id": task_id,
+                                            "stage_id": stage_id,
+                                            "stage_name": stage.stage_name,
+                                            "log_id": run_info["log_id"],
+                                            "tool_call_id": "",
+                                            "chunk": chunk,
+                                            "finished": False,
+                                        },
+                                    )
+                    return full_text
+
+                final_text = await asyncio.wait_for(
+                    _consume_stream(),
                     timeout=settings.WORKER_STAGE_TIMEOUT,
                 )
                 await _emit_chat_received(
                     chat_correlation,
                     status="success",
-                    response_body={"attempt": attempt + 1, "content": response.text_content},
+                    response_body={"attempt": attempt + 1, "content": final_text},
                     duration_ms=round((time.monotonic() - llm_started) * 1000, 2),
                 )
                 break

@@ -1,0 +1,192 @@
+.react-gemini-container {
+  padding: 16px 0;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.react-gemini-turn {
+  margin-bottom: 32px;
+}
+
+.react-gemini-message {
+  display: flex;
+  margin-bottom: 24px;
+}
+
+.message-avatar {
+  flex-shrink: 0;
+  margin-right: 16px;
+  margin-top: 4px;
+}
+
+.message-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.message-author {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 8px;
+  color: #1f1f1f;
+}
+
+.message-bubble {
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.user-bubble {
+  background-color: #f5f5f5;
+  color: #262626;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.message-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+.message-body {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #262626;
+  margin-bottom: 12px;
+}
+
+/* Base styles for the Markdown content */
+.markdown-body p {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.markdown-body pre {
+  background-color: #f6f8fa;
+  border-radius: 6px;
+  padding: 12px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.markdown-body code {
+  background-color: rgba(175, 184, 193, 0.2);
+  border-radius: 4px;
+  padding: 0.2em 0.4em;
+  font-size: 85%;
+}
+
+/* Gemini Tool execution collapse styling */
+.gemini-tool-collapse {
+  background: #f8f9fa;
+  border: 1px solid #e8eaed;
+  border-radius: 8px;
+  overflow: hidden;
+  max-width: 800px;
+}
+
+.gemini-tool-collapse .ant-collapse-header {
+  padding: 10px 16px !important;
+  background-color: #f8f9fa;
+}
+
+.gemini-tool-details {
+  background: #ffffff;
+  border-top: 1px solid #f0f0f0;
+  padding: 12px 16px;
+}
+
+.gemini-tool-args pre,
+.gemini-tool-observation pre {
+  margin: 4px 0 12px 0;
+  padding: 8px 12px;
+  background: #f1f3f4;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: 'Courier New', Courier, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+  color: #202124;
+}
+
+.gemini-tool-observation pre.error-result {
+  background: #fff1f0;
+  color: #cf1322;
+  border: 1px solid #ffa39e;
+}
+
+/* Typing indicator mimicking Gemini */
+.message-typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+}
+
+.message-typing-indicator .dot {
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  background-color: #bfbfbf;
+  border-radius: 50%;
+  animation: typing 1.4s infinite ease-in-out both;
+}
+
+.message-typing-indicator .dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.message-typing-indicator .dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes typing {
+
+  0%,
+  80%,
+  100% {
+    transform: scale(0);
+    opacity: 0.4;
+  }
+
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Cursor-style thought block */
+.cursor-thought-container {
+  margin-bottom: 12px;
+}
+
+.cursor-thought-header {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+  color: #8c8c8c;
+  transition: color 0.2s;
+}
+
+.cursor-thought-header:hover {
+  color: #595959;
+}
+
+.cursor-thought-header .ant-typography {
+  color: inherit;
+  font-size: 13px;
+}
+
+.cursor-thought-content {
+  margin-top: 8px;
+  padding-left: 14px;
+  border-left: 2px solid #e8e8e8;
+  margin-left: 5px;
+}
