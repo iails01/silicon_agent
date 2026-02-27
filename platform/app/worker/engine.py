@@ -287,6 +287,7 @@ async def _setup_worktree(task: TaskModel) -> tuple[Optional[str], Any]:
             task_id=str(task.id),
             task_title=task.title,
             base_branch=task.project.branch or "main",
+            target_branch=task.target_branch,
         )
         if worktree_path:
             logger.info("Task %s using worktree: %s", task.id, worktree_path)
@@ -598,6 +599,7 @@ async def _finalize_task_resources(
             branch = await worktree_mgr.commit_and_push(
                 task_id=str(task.id),
                 commit_message=f"feat: {task.title}\n\nTask-ID: {task.id}",
+                target_branch=task.target_branch,
             )
             duration_ms = round((time.monotonic() - worktree_commit_started_at) * 1000, 2)
             await _emit_system_log(
@@ -808,6 +810,20 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     compression.add(compressed)
                 else:
                     logger.warning("Compression failed for resumed stage %s", stage.stage_name)
+                    
+            # Check gates for resumed stages
+            for stage in group:
+                gate_def = gates.get(stage.stage_name)
+                if gate_def:
+                    gate_result = await _handle_gate_with_retry(
+                        session, task, stage, gate_def,
+                        stage.output_summary or "", stage_index_base, prior_outputs, compression,
+                        project_memory_store, repo_context, stage_defs,
+                        worktree_path, sandbox_info,
+                    )
+                    if gate_result is None:
+                        return
+                    
             stage_index_base += len(group)
             continue
 
@@ -1018,7 +1034,6 @@ async def _process_task_graph(
     skipped: set[str] = set()
     execution_counts: Dict[str, int] = defaultdict(int)
 
-    # Initialize state from existing stage statuses (for resume)
     for stage in sorted_stages:
         if stage.status == "completed":
             completed.add(stage.stage_name)
@@ -1028,6 +1043,19 @@ async def _process_task_graph(
             })
             if stage.output_structured:
                 structured_outputs[stage.stage_name] = stage.output_structured
+                
+            # Phase 2: Missing check! Resume outstanding gates for completed stages in graph!
+            gate_def = gates.get(stage.stage_name)
+            if gate_def:
+                gate_result = await _handle_gate_with_retry(
+                    session, task, stage, gate_def,
+                    stage.output_summary or "", len(completed) + len(skipped),  # stage_index approximate
+                    prior_outputs, compression,
+                    project_memory_store, repo_context, stage_defs,
+                    worktree_path, sandbox_info,
+                )
+                if gate_result is None:
+                    return
         elif stage.status == "skipped":
             skipped.add(stage.stage_name)
         execution_counts[stage.stage_name] = stage.execution_count
@@ -1888,37 +1916,58 @@ async def _handle_gate(
         correlation_id=gate_corr,
         response_body={"gate_type": gate_type},
     )
-
-    gate = HumanGateModel(
-        gate_type=gate_type,
-        task_id=task.id,
-        agent_role=stage.agent_role,
-        status="pending",
-        content={
-            "stage": stage.stage_name,
-            "summary": stage_output[:500] if stage_output else "",
-        },
-        retry_count=current_retry,
+    # Check if a pending gate already exists for this task and stage
+    result = await session.execute(
+        select(HumanGateModel)
+        .where(
+            HumanGateModel.task_id == task.id,
+            HumanGateModel.gate_type == gate_type,
+            HumanGateModel.status == "pending",
+        )
     )
-    session.add(gate)
-    await session.commit()
-    await session.refresh(gate)
+    existing_gate = None
+    for row in result.scalars().all():
+        if row.content and row.content.get("stage") == stage.stage_name:
+            existing_gate = row
+            break
 
-    await _safe_broadcast(GATE_CREATED, {
-        "gate_id": gate.id,
-        "task_id": task.id,
-        "gate_type": gate_type,
-        "stage_name": stage.stage_name,
-    })
+    if existing_gate:
+        gate = existing_gate
+        logger.info(
+            "Found existing pending gate after stage %s (gate_id=%s)",
+            stage.stage_name, gate.id,
+        )
+    else:
+        gate = HumanGateModel(
+            gate_type=gate_type,
+            task_id=task.id,
+            agent_role=stage.agent_role,
+            status="pending",
+            content={
+                "stage": stage.stage_name,
+                "summary": stage_output[:500] if stage_output else "",
+            },
+            retry_count=current_retry,
+        )
+        session.add(gate)
+        await session.commit()
+        await session.refresh(gate)
 
-    # External notification for gate approval
-    await notify_gate_created(gate.id, task.id, stage.stage_name, gate_type)
+        await _safe_broadcast(GATE_CREATED, {
+            "gate_id": gate.id,
+            "task_id": task.id,
+            "gate_type": gate_type,
+            "stage_name": stage.stage_name,
+        })
 
-    logger.info(
-        "Gate created after stage %s (gate_id=%s), waiting for approval",
-        stage.stage_name,
-        gate.id,
-    )
+        # External notification for gate approval
+        await notify_gate_created(gate.id, task.id, stage.stage_name, gate_type)
+
+        logger.info(
+            "Gate created after stage %s (gate_id=%s), waiting for approval",
+            stage.stage_name,
+            gate.id,
+        )
 
     # Poll for gate resolution with timeout
     gate_start = datetime.now(timezone.utc)

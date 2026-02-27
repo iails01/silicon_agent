@@ -40,18 +40,29 @@ function parseReActTurns(logs: TaskLogEvent[]): ReActTurn[] {
     let currentTurnNumber = 1;
 
     for (const log of sorted) {
-        const key = log.correlation_id || log.id;
+        let key = log.correlation_id || log.id;
+
+        // Normalize: Strip ':turn:0', ':turn:1' etc. from correlation IDs 
+        // to group LLM turn events with their parent chat runner event.
+        if (key.includes(':turn:')) {
+            key = key.split(':turn:')[0];
+        }
+
         if (!turnsMap.has(key)) {
             turnsMap.set(key, { id: key, turnNumber: currentTurnNumber++ });
         }
         const turn = turnsMap.get(key)!;
 
+        // ... existing assignments ...
         if (log.event_type === 'agent_runner_chat_sent') {
             turn.prompt = log;
         } else if (log.event_type === 'llm_turn_sent') {
             turn.thought_sent = log;
         } else if (log.event_type === 'llm_turn_received' || log.event_type === 'agent_runner_chat_received') {
-            turn.thought = log;
+            // Favor the inner most thought content if both exist
+            if (log.event_type === 'llm_turn_received' || !turn.thought) {
+                turn.thought = log;
+            }
         } else if (log.event_type === 'tool_call_executed') {
             if (log.status === 'running' && !turn.action) {
                 turn.action = log;
@@ -68,7 +79,7 @@ function parseReActTurns(logs: TaskLogEvent[]): ReActTurn[] {
 const ExpandablePromptBlock: React.FC<{ content: string; title: string; maxHeight?: number }> = ({ content, title, maxHeight = 150 }) => {
     const [expanded, setExpanded] = useState(false);
     const [isOverflowing, setIsOverflowing] = useState(false);
-    const contentRef = useRef<HTMLPreElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (contentRef.current) {
@@ -100,7 +111,9 @@ const ExpandablePromptBlock: React.FC<{ content: string; title: string; maxHeigh
                         position: 'relative'
                     }}
                 >
-                    <pre ref={contentRef} className="message-pre">{content}</pre>
+                    <div ref={contentRef} className="markdown-body message-pre" style={{ whiteSpace: 'normal', fontSize: '13px' }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+                    </div>
                 </div>
             </div>
         </div>

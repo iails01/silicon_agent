@@ -20,7 +20,11 @@ class GateService:
         self.session = session
 
     async def list_gates(
-        self, page: int = 1, page_size: int = 20, status: Optional[str] = None
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        status: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> GateListResponse:
         query = select(HumanGateModel)
         count_query = select(func.count()).select_from(HumanGateModel)
@@ -28,6 +32,9 @@ class GateService:
         if status:
             query = query.where(HumanGateModel.status == status)
             count_query = count_query.where(HumanGateModel.status == status)
+        if task_id:
+            query = query.where(HumanGateModel.task_id == task_id)
+            count_query = count_query.where(HumanGateModel.task_id == task_id)
 
         total_result = await self.session.execute(count_query)
         total = total_result.scalar() or 0

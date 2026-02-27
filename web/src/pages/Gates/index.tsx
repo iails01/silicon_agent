@@ -1,4 +1,5 @@
 import React from 'react';
+import { useLocation } from 'react-router-dom';
 import { Row, Col, Typography, Spin, Empty, Segmented, message } from 'antd';
 import { useGateList, useApproveGate, useRejectGate, useReviseGate } from '@/hooks/useGates';
 import GateApprovalCard from '@/components/GateApprovalCard';
@@ -6,11 +7,33 @@ import GateApprovalCard from '@/components/GateApprovalCard';
 const { Title } = Typography;
 
 const GatesPage: React.FC = () => {
-  const [statusFilter, setStatusFilter] = React.useState<string>('pending');
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  const statusQuery = searchParams.get('status');
+  const initialStatus = statusQuery === 'all' ? '' : (statusQuery || 'pending');
+
+  const [statusFilter, setStatusFilter] = React.useState<string>(initialStatus);
   const { data: gates, isLoading } = useGateList({ status: statusFilter });
   const approveGate = useApproveGate();
   const rejectGate = useRejectGate();
   const reviseGate = useReviseGate();
+
+  React.useEffect(() => {
+    if (!isLoading && gates && location.hash) {
+      // Small timeout to ensure DOM is updated
+      setTimeout(() => {
+        const id = location.hash.replace('#', '');
+        const elem = document.getElementById(id);
+        if (elem) {
+          elem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          elem.style.boxShadow = '0 0 0 2px #1890ff';
+          setTimeout(() => {
+            elem.style.boxShadow = '';
+          }, 3000);
+        }
+      }, 100);
+    }
+  }, [isLoading, gates, location.hash]);
 
   const handleApprove = async (id: string, comment?: string) => {
     await approveGate.mutateAsync({ id, req: comment ? { comment } : undefined });

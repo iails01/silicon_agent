@@ -12,6 +12,8 @@ class TaskCreateRequest(BaseModel):
     description: Optional[str] = None
     template_id: Optional[str] = None
     project_id: Optional[str] = None
+    target_branch: Optional[str] = None
+    yunxiao_task_id: Optional[str] = None
 
 
 class TaskStageResponse(BaseModel):
@@ -57,6 +59,8 @@ class TaskDetailResponse(BaseModel):
     project_id: Optional[str] = None
     template_name: Optional[str] = None
     project_name: Optional[str] = None
+    target_branch: Optional[str] = None
+    yunxiao_task_id: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -95,6 +99,8 @@ class BatchTaskItem(BaseModel):
     description: Optional[str] = None
     template_id: Optional[str] = None
     project_id: Optional[str] = None
+    target_branch: Optional[str] = None
+    yunxiao_task_id: Optional[str] = None
 
 
 class TaskBatchCreateRequest(BaseModel):
