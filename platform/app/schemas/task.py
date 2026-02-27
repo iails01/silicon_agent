@@ -28,6 +28,14 @@ class TaskStageResponse(BaseModel):
     self_fix_count: int = 0
     output_summary: Optional[str] = None
     error_message: Optional[str] = None
+    # Phase 1.1: Structured output
+    output_structured: Optional[dict] = None
+    # Phase 1.2: Failure classification
+    failure_category: Optional[str] = None
+    # Phase 2.2: Self-assessment confidence
+    self_assessment_score: Optional[float] = None
+    # Phase 2.5: Per-stage retry count
+    retry_count: int = 0
 
     model_config = {"from_attributes": True}
 

@@ -1,10 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline } from 'antd';
+import { useQuery } from '@tanstack/react-query';
+import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline, Tabs } from 'antd';
 import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined } from '@ant-design/icons';
 import { useTask, useCancelTask, useRetryTask } from '@/hooks/useTasks';
 import { useStageLogStore } from '@/stores/stageLogStore';
+import { listTaskLogs } from '@/services/taskLogApi';
 import PipelineView from '@/components/PipelineView';
+import ReActTimeline from '@/components/ReActTimeline';
 import { STAGE_NAMES } from '@/utils/constants';
 import { formatTimestamp, formatTokens, formatCost, formatDuration } from '@/utils/formatters';
 
@@ -17,6 +20,7 @@ const STATUS_COLOR: Record<string, string> = {
   failed: 'error',
   cancelled: 'warning',
   skipped: 'default',
+  planning: 'warning',
 };
 
 const STAGE_DISPLAY: Record<string, string> = Object.fromEntries(
@@ -80,6 +84,28 @@ const StageLiveLog: React.FC<{ stageId: string }> = ({ stageId }) => {
       />
     </div>
   );
+};
+
+const StageReActDetails: React.FC<{ taskId: string; stageId: string; stageName: string; isRunning: boolean }> = ({ taskId, stageId, stageName, isRunning }) => {
+  const liveLogs = useStageLogStore((s) => s.logsByStage[stageId] ?? EMPTY_LOGS);
+
+  // Fetch historical logs for this stage
+  const { data, isLoading } = useQuery({
+    queryKey: ['taskLogs', taskId, stageName],
+    queryFn: () => listTaskLogs({ task: taskId, stage: stageName, page_size: 500 }),
+    enabled: !!taskId && !!stageName,
+    refetchInterval: isRunning ? 3000 : false, // Poll if still running to get the latest DB state
+  });
+
+  const historicalLogs = data?.items || [];
+
+  // Merge: Since our ReActTimeline handles all event types natively based on correlation mapping,
+  // we mainly rely on historicalLogs (DB state) which is richer.
+  // The 'liveLogs' from WebSocket are simpler StageLogPayloads. 
+  // In a robust implementation, we'd map WS to TaskLogEvents, but since we poll when running,
+  // passing historicalLogs covers most of the ReAct rendering nicely.
+
+  return <ReActTimeline logs={historicalLogs} loading={isLoading} />;
 };
 
 const TaskDetail: React.FC = () => {
@@ -154,35 +180,116 @@ const TaskDetail: React.FC = () => {
                   </Space>
                 }
               >
-                {stage.output_summary ? (
-                  <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
-                    {stage.output_summary}
-                  </Typography.Paragraph>
-                ) : stage.error_message ? (
-                  <div>
-                    <Typography.Text type="danger">{stage.error_message}</Typography.Text>
-                    {task.status === 'failed' && (
-                      <div style={{ marginTop: 12 }}>
-                        <Button
-                          type="primary"
-                          size="small"
-                          icon={<ReloadOutlined />}
-                          onClick={async () => {
-                            await retryTask.mutateAsync(task.id);
-                            message.success('任务已重新提交，将从失败阶段继续执行');
-                          }}
-                          loading={retryTask.isPending}
-                        >
-                          从此阶段重试
-                        </Button>
-                      </div>
+                {/* Top Section: High-level metadata (Badges, Retries, Failure Category) */}
+                <div style={{ marginBottom: 12 }}>
+                  <Space wrap>
+                    {/* Phase 1.1: Structured output badges */}
+                    {stage.output_structured && (
+                      <>
+                        <Tag color={stage.output_structured.status === 'pass' ? 'green' : stage.output_structured.status === 'fail' ? 'red' : 'orange'}>
+                          {stage.output_structured.status}
+                        </Tag>
+                        {stage.output_structured.confidence != null && (
+                          <Tag color={stage.output_structured.confidence >= 0.7 ? 'green' : stage.output_structured.confidence >= 0.5 ? 'orange' : 'red'}>
+                            信心: {Math.round(stage.output_structured.confidence * 100)}%
+                          </Tag>
+                        )}
+                        {/* Stage-specific badges */}
+                        {(stage.output_structured as Record<string, unknown>).tests_passed != null && (
+                          <Tag color="green">通过: {String((stage.output_structured as Record<string, unknown>).tests_passed)}</Tag>
+                        )}
+                        {(stage.output_structured as Record<string, unknown>).tests_failed != null && Number((stage.output_structured as Record<string, unknown>).tests_failed) > 0 && (
+                          <Tag color="red">失败: {String((stage.output_structured as Record<string, unknown>).tests_failed)}</Tag>
+                        )}
+                        {(stage.output_structured as Record<string, unknown>).issues_critical != null && Number((stage.output_structured as Record<string, unknown>).issues_critical) > 0 && (
+                          <Tag color="red">Critical: {String((stage.output_structured as Record<string, unknown>).issues_critical)}</Tag>
+                        )}
+                        {(stage.output_structured as Record<string, unknown>).issues_major != null && Number((stage.output_structured as Record<string, unknown>).issues_major) > 0 && (
+                          <Tag color="orange">Major: {String((stage.output_structured as Record<string, unknown>).issues_major)}</Tag>
+                        )}
+                        {stage.output_structured.artifacts && stage.output_structured.artifacts.length > 0 && (
+                          <Tag>{stage.output_structured.artifacts.length} 文件</Tag>
+                        )}
+                      </>
                     )}
-                  </div>
-                ) : stage.status === 'running' ? (
-                  <StageLiveLog stageId={stage.id} />
-                ) : (
-                  <Empty description="暂无产出" />
-                )}
+                    {/* Phase 1.2: Failure category badge */}
+                    {stage.failure_category && (
+                      <Tag color="volcano">{stage.failure_category}</Tag>
+                    )}
+                    {/* Phase 2.5: Retry count */}
+                    {stage.retry_count > 0 && (
+                      <Tag>重试 {stage.retry_count}</Tag>
+                    )}
+                  </Space>
+                  {stage.output_structured?.summary && (
+                    <div style={{ marginTop: 4, color: '#666', fontSize: 13 }}>
+                      {stage.output_structured.summary}
+                    </div>
+                  )}
+                </div>
+
+                <Tabs
+                  defaultActiveKey="react"
+                  items={[
+                    {
+                      key: 'react',
+                      label: '推演过程 (ReAct Track)',
+                      children: (
+                        <div style={{ padding: '8px 0' }}>
+                          <StageReActDetails
+                            taskId={task.id}
+                            stageId={stage.id}
+                            stageName={stage.stage_name}
+                            isRunning={stage.status === 'running'}
+                          />
+                        </div>
+                      ),
+                    },
+                    {
+                      key: 'output',
+                      label: '产出详情 & 日志',
+                      children: (
+                        <div style={{ minHeight: 120 }}>
+                          {stage.output_summary ? (
+                            <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
+                              {stage.output_summary}
+                            </Typography.Paragraph>
+                          ) : stage.error_message ? (
+                            <div style={{ padding: 16 }}>
+                              <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
+                                {stage.error_message}
+                              </Typography.Text>
+                              {task.status === 'failed' && (
+                                <Button
+                                  type="primary"
+                                  size="small"
+                                  icon={<ReloadOutlined />}
+                                  onClick={async () => {
+                                    await retryTask.mutateAsync(task.id);
+                                    message.success('任务已重新提交，将从失败阶段继续执行');
+                                  }}
+                                  loading={retryTask.isPending}
+                                >
+                                  从此阶段重试
+                                </Button>
+                              )}
+                            </div>
+                          ) : stage.status === 'running' ? (
+                            <div style={{ padding: 16 }}>
+                              <StageLiveLog stageId={stage.id} />
+                            </div>
+                          ) : stage.status === 'skipped' ? (
+                            <div style={{ padding: 32, color: '#999', fontStyle: 'italic', textAlign: 'center' }}>
+                              条件不满足，阶段已跳过
+                            </div>
+                          ) : (
+                            <Empty description="暂无产出摘要" style={{ margin: '32px 0' }} />
+                          )}
+                        </div>
+                      ),
+                    },
+                  ]}
+                />
               </Collapse.Panel>
             ))}
           </Collapse>

@@ -4,9 +4,18 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.session import get_db
 from app.dependencies import get_skill_service
-from app.schemas.skill import SkillCreateRequest, SkillDetailResponse, SkillListResponse, SkillStatsResponse, SkillUpdateRequest
+from app.schemas.skill import (
+    SkillCreateRequest,
+    SkillDetailResponse,
+    SkillEffectivenessItem,
+    SkillListResponse,
+    SkillStatsResponse,
+    SkillUpdateRequest,
+)
 from app.services.skill_service import SkillService
 from app.services.skill_sync_service import sync_skills_from_filesystem
 
@@ -46,6 +55,17 @@ async def create_skill(
 @router.get("/stats", response_model=SkillStatsResponse)
 async def get_skill_stats(service: SkillService = Depends(get_skill_service)):
     return await service.get_stats()
+
+
+@router.get("/effectiveness", response_model=list[SkillEffectivenessItem])
+async def get_skill_effectiveness(
+    skill_name: Optional[str] = None,
+    session: AsyncSession = Depends(get_db),
+):
+    """Query skill effectiveness metrics, optionally filtered by skill_name."""
+    from app.services.skill_feedback_service import get_skill_effectiveness
+    data = await get_skill_effectiveness(session, skill_name=skill_name)
+    return [SkillEffectivenessItem(**item) for item in data]
 
 
 @router.get("/{name}", response_model=SkillDetailResponse)

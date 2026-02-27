@@ -7,6 +7,7 @@ from app.models.audit import AuditLogModel, CircuitBreakerModel
 from app.models.template import TaskTemplateModel
 from app.models.project import ProjectModel
 from app.models.task_log import TaskStageLogModel
+from app.models.skill_feedback import SkillFeedbackModel
 
 __all__ = [
     "AgentModel",
@@ -20,4 +21,5 @@ __all__ = [
     "TaskTemplateModel",
     "ProjectModel",
     "TaskStageLogModel",
+    "SkillFeedbackModel",
 ]

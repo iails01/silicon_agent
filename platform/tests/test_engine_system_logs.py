@@ -121,7 +121,7 @@ async def test_handle_gate_emits_started_and_cancelled_when_worker_stops(monkeyp
             gate_type='human_approve',
             stage_output='ready to review',
         )
-        assert approved is False
+        assert approved["result"] == "cancelled"
         assert [item['event_type'] for item in emitted] == [
             'gate_wait_started',
             'gate_wait_cancelled',

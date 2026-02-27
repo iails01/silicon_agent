@@ -2,12 +2,17 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  backend:
+  backend-lint:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -19,6 +24,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: platform/pyproject.toml
+
+      - name: Setup SSH for private dependencies
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Install dependencies
         run: |
@@ -28,10 +40,35 @@ jobs:
       - name: Lint with ruff
         run: ruff check app/ tests/
 
-      - name: Run tests
-        run: pytest tests/ -v
+  backend-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: platform
 
-  frontend:
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: platform/pyproject.toml
+
+      - name: Setup SSH for private dependencies
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Run tests with coverage
+        run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=60
+
+  frontend-check:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -43,6 +80,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
         run: npm ci

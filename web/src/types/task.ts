@@ -1,3 +1,13 @@
+export interface StageOutputStructured {
+  summary: string;
+  status: 'pass' | 'fail' | 'partial';
+  confidence: number;
+  artifacts: string[];
+  metadata: Record<string, unknown>;
+  // Stage-specific fields (varies by stage)
+  [key: string]: unknown;
+}
+
 export interface TaskStage {
   id: string;
   task_id: string;
@@ -11,6 +21,14 @@ export interface TaskStage {
   turns_used: number;
   output_summary: string | null;
   error_message: string | null;
+  // Phase 1.1: Structured output
+  output_structured: StageOutputStructured | null;
+  // Phase 1.2: Failure classification
+  failure_category: string | null;
+  // Phase 2.2: Self-assessment confidence
+  self_assessment_score: number | null;
+  // Phase 2.5: Per-stage retry count
+  retry_count: number;
 }
 
 export interface Task {
@@ -18,7 +36,7 @@ export interface Task {
   jira_id: string | null;
   title: string;
   description: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'planning';
   created_at: string;
   completed_at: string | null;
   stages: TaskStage[];

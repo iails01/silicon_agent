@@ -9,6 +9,7 @@ from app.models.skill import SkillModel, SkillVersionModel
 from app.schemas.skill import (
     SkillCreateRequest,
     SkillDetailResponse,
+    SkillEffectivenessItem,
     SkillListResponse,
     SkillStatsResponse,
     SkillUpdateRequest,
@@ -226,4 +227,11 @@ class SkillService:
             if count > 0:
                 by_status[status_val] = count
 
-        return SkillStatsResponse(total=total, by_layer=by_layer, by_status=by_status)
+        # Skill effectiveness from feedback aggregation
+        from app.services.skill_feedback_service import get_skill_effectiveness
+        effectiveness_data = await get_skill_effectiveness(self.session)
+        effectiveness = [SkillEffectivenessItem(**item) for item in effectiveness_data]
+
+        return SkillStatsResponse(
+            total=total, by_layer=by_layer, by_status=by_status, effectiveness=effectiveness
+        )

@@ -53,7 +53,19 @@ class SkillListResponse(BaseModel):
     page_size: int
 
 
+class SkillEffectivenessItem(BaseModel):
+    skill_name: str
+    invocations: int
+    success_count: int
+    failure_count: int
+    gate_reject_count: int
+    success_rate: float
+    avg_duration_ms: float
+    avg_tokens: float
+
+
 class SkillStatsResponse(BaseModel):
     total: int
     by_layer: Dict[str, int]
     by_status: Dict[str, int]
+    effectiveness: List[SkillEffectivenessItem] = []
