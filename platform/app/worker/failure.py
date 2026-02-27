@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import Optional
+from typing import Dict
 
 
 class FailureCategory(str, Enum):
@@ -104,6 +104,72 @@ def classify_failure(
             return FailureCategory.TRANSIENT
 
     return FailureCategory.UNKNOWN
+
+
+async def generate_structured_reflection(
+    error_message: str,
+    stage_output: str,
+    stage_name: str,
+    agent_role: str,
+) -> Dict[str, str]:
+    """Use LLM to generate structured reflection on a stage failure.
+
+    Returns {"root_cause": "...", "lesson": "...", "suggestion": "..."}.
+    Falls back to raw error if LLM is unavailable.
+    """
+    fallback = {
+        "root_cause": error_message,
+        "lesson": "",
+        "suggestion": "重新尝试",
+    }
+    if not error_message:
+        return fallback
+
+    try:
+        from app.integration.llm_client import ChatMessage, get_llm_client
+
+        from app.config import settings
+        model_override = settings.SKILL_REFLECTION_MODEL or None
+        client = get_llm_client()
+
+        truncated_output = (stage_output or "")[:2000]
+        prompt = (
+            "你是一个任务失败分析助手。请分析以下阶段执行失败的情况，给出结构化反思。\n\n"
+            f"**阶段名称:** {stage_name}\n"
+            f"**执行角色:** {agent_role}\n"
+            f"**错误信息:** {error_message}\n"
+        )
+        if truncated_output:
+            prompt += f"**部分产出:**\n{truncated_output}\n"
+        prompt += (
+            "\n请严格按以下 JSON 格式回复（不要添加 markdown 代码块标记）：\n"
+            '{"root_cause": "根因分析(一句话)", '
+            '"lesson": "经验教训(一句话)", '
+            '"suggestion": "改进建议(一句话)"}'
+        )
+
+        resp = await client.chat(
+            messages=[ChatMessage(role="user", content=prompt)],
+            model=model_override,
+            temperature=0.3,
+            max_tokens=300,
+        )
+
+        import json
+        data = json.loads(resp.content.strip())
+        if isinstance(data, dict):
+            return {
+                "root_cause": data.get("root_cause", error_message),
+                "lesson": data.get("lesson", ""),
+                "suggestion": data.get("suggestion", "重新尝试"),
+            }
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Structured reflection failed, using fallback", exc_info=True
+        )
+
+    return fallback
 
 
 def is_auto_retryable(category: FailureCategory, auto_retry_categories: str) -> bool:

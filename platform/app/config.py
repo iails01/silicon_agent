@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     DYNAMIC_ROUTING_MODEL: str = ""
     TEMPLATE_VERSIONING_ENABLED: bool = False
 
+    # Skill self-learning (Phase 1)
+    SKILL_FEEDBACK_ENABLED: bool = True       # Enable skill effectiveness metrics
+    SKILL_REFLECTION_ENABLED: bool = True     # Enable structured reflection on failure
+    SKILL_REFLECTION_MODEL: str = ""          # Model for reflection (empty = default)
+
     # Task log pipeline
     TASK_LOG_PIPELINE_QUEUE_SIZE: int = 4000
     TASK_LOG_PIPELINE_FLUSH_INTERVAL_SECONDS: float = 1.0

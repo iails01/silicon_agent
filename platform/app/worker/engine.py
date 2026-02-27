@@ -413,6 +413,16 @@ async def _finalize_task_resources(
                 result="memory_extract_failed",
             )
 
+    # Aggregate skill invocation metrics from task logs
+    if settings.SKILL_FEEDBACK_ENABLED:
+        try:
+            from app.services.skill_feedback_service import aggregate_skill_metrics
+            await aggregate_skill_metrics(session, str(task.id))
+        except Exception:
+            logger.warning(
+                "Skill metrics aggregation failed for task %s", task.id, exc_info=True
+            )
+
     # Worktree: commit, push, and optionally create PR
     if worktree_mgr and worktree_path:
         worktree_commit_corr = f"worktree-commit-{uuid.uuid4().hex}"
@@ -1052,10 +1062,55 @@ async def _execute_single_stage(
     if stage.error_message or stage.output_summary:
         # Stage has prior failure info — inject it for smarter retry
         if stage.error_message:
-            retry_context = {
-                "error": stage.error_message,
-                "prior_output": (stage.output_summary or "")[:2000],
-            }
+            if settings.SKILL_REFLECTION_ENABLED:
+                try:
+                    from app.worker.failure import generate_structured_reflection
+                    reflection = await generate_structured_reflection(
+                        error_message=stage.error_message,
+                        stage_output=stage.output_summary or "",
+                        stage_name=stage.stage_name,
+                        agent_role=stage.agent_role,
+                    )
+                    retry_context = {
+                        "error": reflection.get("root_cause", stage.error_message),
+                        "lesson": reflection.get("lesson", ""),
+                        "suggestion": reflection.get("suggestion", ""),
+                        "prior_output": (stage.output_summary or "")[:2000],
+                    }
+                    # Persist lesson to project memory
+                    if (
+                        reflection.get("lesson")
+                        and settings.MEMORY_ENABLED
+                        and task.project_id
+                    ):
+                        try:
+                            from app.worker.memory import MemoryEntry, ProjectMemoryStore
+                            store = ProjectMemoryStore(str(task.project_id))
+                            entry = MemoryEntry.create(
+                                content=reflection["lesson"],
+                                source_task_id=str(task.id),
+                                source_task_title=task.title,
+                                confidence=0.7,
+                                tags=["auto-reflection", stage.stage_name],
+                            )
+                            await store.add_entries("issues", [entry])
+                        except Exception:
+                            logger.warning(
+                                "Failed to persist reflection to memory", exc_info=True
+                            )
+                except Exception:
+                    logger.warning(
+                        "Structured reflection failed, using raw error", exc_info=True
+                    )
+                    retry_context = {
+                        "error": stage.error_message,
+                        "prior_output": (stage.output_summary or "")[:2000],
+                    }
+            else:
+                retry_context = {
+                    "error": stage.error_message,
+                    "prior_output": (stage.output_summary or "")[:2000],
+                }
 
     # Determine working directory: worktree for code-producing roles, tmpdir otherwise
     _CODE_ROLES = {"coding", "test"}
