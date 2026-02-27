@@ -578,6 +578,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
 
     prior_outputs: List[Dict[str, str]] = []
     compression = CompressionResult()
+    # Phase 2.1: Track structured outputs for condition evaluation
+    structured_outputs: Dict[str, dict] = {}
 
     # Load repo context from project
     repo_context: Optional[str] = None
@@ -597,7 +599,24 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
         except Exception:
             logger.warning("Failed to init memory store for project %s", task.project_id, exc_info=True)
 
-    # Group stages by order for parallel execution
+    # Phase 3.1: Graph-based execution when enabled
+    if settings.GRAPH_EXECUTION_ENABLED and task.template:
+        await _process_task_graph(
+            session, task, sorted_stages, stage_defs, gates,
+            prior_outputs, compression, structured_outputs,
+            project_memory_store, repo_context, worktree_path, sandbox_info,
+        )
+        # Finalize and return
+        await _finalize_task_resources(
+            session, task, prior_outputs, project_memory_store,
+            worktree_mgr, worktree_path, sandbox_mgr, sandbox_info,
+        )
+        from app.worker.agents import close_agents_for_task
+        close_agents_for_task(str(task.id))
+        await _complete_task(session, task)
+        return
+
+    # Group stages by order for parallel execution (legacy linear mode)
     stage_groups = _group_stages_by_order(sorted_stages, task)
     stage_index_base = 0
 
@@ -636,6 +655,18 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
         # Execute stages in this group (parallel if multiple)
         if len(group) == 1:
             stage = group[0]
+
+            # Phase 2.1: Check condition before executing
+            if _should_skip_stage(stage, stage_defs, structured_outputs):
+                stage.status = "skipped"
+                await session.commit()
+                await _safe_broadcast(TASK_STAGE_UPDATE, {
+                    "task_id": task.id, "stage_id": stage.id,
+                    "stage_name": stage.stage_name, "status": "skipped",
+                })
+                stage_index_base += len(group)
+                continue
+
             result = await _execute_single_stage(
                 session, task, stage, stage_index_base,
                 prior_outputs, compression, project_memory_store,
@@ -650,15 +681,35 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
             else:
                 logger.warning("Compression failed for stage %s", stage.stage_name)
 
+            # Phase 1.1/2.1: Collect structured output for conditions
+            if stage.output_structured:
+                structured_outputs[stage.stage_name] = stage.output_structured
+
             await _record_stage_audit(session, stage)
             if await _check_circuit_breaker(session, task, stage):
                 return
 
-            gate_type = gates.get(stage.stage_name)
-            if gate_type:
-                if not await _handle_gate(session, task, stage, gate_type, result):
-                    await _fail_task(session, task, f"Gate rejected after stage {stage.stage_name}")
-                    return
+            # Phase 2.3: Dynamic gate insertion for low confidence
+            if await _maybe_insert_dynamic_gate(session, task, stage, result):
+                pass  # Gate handled, continue
+
+            gate_def = gates.get(stage.stage_name)
+            if gate_def:
+                gate_result = await _handle_gate_with_retry(
+                    session, task, stage, gate_def,
+                    result, stage_index_base, prior_outputs, compression,
+                    project_memory_store, repo_context, stage_defs,
+                    worktree_path, sandbox_info,
+                )
+                if gate_result is None:
+                    return  # task failed or gate rejected without retries
+                # Update result to the latest output after possible retries
+                result = gate_result
+
+            # Phase 3.2: Interactive planning — pause after parse stage
+            if await _check_interactive_planning(session, task, stage, result):
+                return  # Task paused for plan review
+
         else:
             # Parallel execution for same-order stages
             logger.info(
@@ -671,6 +722,17 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     prior_outputs.append({
                         "stage": stage.stage_name,
                         "output": stage.output_summary or "",
+                    })
+                    if stage.output_structured:
+                        structured_outputs[stage.stage_name] = stage.output_structured
+                    continue
+                # Phase 2.1: Check condition for parallel stages too
+                if _should_skip_stage(stage, stage_defs, structured_outputs):
+                    stage.status = "skipped"
+                    await session.commit()
+                    await _safe_broadcast(TASK_STAGE_UPDATE, {
+                        "task_id": task.id, "stage_id": stage.id,
+                        "stage_name": stage.stage_name, "status": "skipped",
                     })
                     continue
                 coro = _execute_single_stage(
@@ -686,7 +748,7 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     result = await atask
                 except Exception as e:
                     logger.exception("Parallel stage %s failed", stage_name)
-                    await mark_stage_failed(session, task, stage, str(e))
+                    await mark_stage_failed(session, task, stage, str(e), error=e)
                     # Cancel remaining parallel tasks
                     for _, (_, other_task) in tasks_map.items():
                         if not other_task.done():
@@ -704,6 +766,9 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     compression.add(compressed)
                 else:
                     logger.warning("Compression failed for stage %s", stage_name)
+                # Phase 1.1/2.1: Collect structured output
+                if stage.output_structured:
+                    structured_outputs[stage.stage_name] = stage.output_structured
                 await _record_stage_audit(session, stage)
 
             if await _check_circuit_breaker(session, task, group[0]):
@@ -711,13 +776,16 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
 
             # Gates for parallel stages (check each)
             for stage in group:
-                gate_type = gates.get(stage.stage_name)
-                if gate_type:
+                gate_def = gates.get(stage.stage_name)
+                if gate_def:
                     output = stage.output_summary or ""
-                    if not await _handle_gate(session, task, stage, gate_type, output):
-                        await _fail_task(
-                            session, task, f"Gate rejected after stage {stage.stage_name}",
-                        )
+                    gate_result = await _handle_gate_with_retry(
+                        session, task, stage, gate_def,
+                        output, stage_index_base, prior_outputs, compression,
+                        project_memory_store, repo_context, stage_defs,
+                        worktree_path, sandbox_info,
+                    )
+                    if gate_result is None:
                         return
 
         stage_index_base += len(group)
@@ -734,6 +802,210 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
     await _complete_task(session, task)
 
 
+async def _process_task_graph(
+    session: AsyncSession,
+    task: TaskModel,
+    sorted_stages: List[TaskStageModel],
+    stage_defs: Dict[str, dict],
+    gates: Dict[str, dict],
+    prior_outputs: List[Dict[str, str]],
+    compression: CompressionResult,
+    structured_outputs: Dict[str, dict],
+    project_memory_store,
+    repo_context: Optional[str],
+    worktree_path: Optional[str] = None,
+    sandbox_info=None,
+) -> None:
+    """Phase 3.1: Graph-driven stage execution loop.
+
+    Uses StageGraph to determine ready stages based on dependencies,
+    executing them in parallel when multiple are ready simultaneously.
+    Supports failure redirects and cycle-limited loops.
+    """
+    from app.worker.graph import StageGraph
+
+    # Build graph from template
+    template_stages = task.template.stages if task.template else None
+    graph = StageGraph.from_template_stages(template_stages)
+
+    # Validate graph
+    errors = graph.validate()
+    if errors:
+        logger.error("Invalid stage graph for task %s: %s", task.id, errors)
+        await _fail_task(session, task, f"Invalid stage graph: {'; '.join(errors)}")
+        return
+
+    # Build stage lookup
+    stage_map = {s.stage_name: s for s in sorted_stages}
+
+    # Track execution state
+    completed: set[str] = set()
+    running: set[str] = set()
+    failed: set[str] = set()
+    skipped: set[str] = set()
+    execution_counts: Dict[str, int] = defaultdict(int)
+
+    # Initialize state from existing stage statuses (for resume)
+    for stage in sorted_stages:
+        if stage.status == "completed":
+            completed.add(stage.stage_name)
+            prior_outputs.append({
+                "stage": stage.stage_name,
+                "output": stage.output_summary or "",
+            })
+            if stage.output_structured:
+                structured_outputs[stage.stage_name] = stage.output_structured
+        elif stage.status == "skipped":
+            skipped.add(stage.stage_name)
+        execution_counts[stage.stage_name] = stage.execution_count
+
+    max_iterations = settings.GRAPH_MAX_LOOP_ITERATIONS * len(graph.nodes)
+    iteration = 0
+
+    while iteration < max_iterations:
+        iteration += 1
+
+        # Check cancellation
+        if await _is_cancelled(session, task.id):
+            logger.info("Task %s cancelled during graph execution", task.id)
+            return
+
+        # Get ready stages
+        ready = graph.get_ready_stages(completed, running, failed, skipped, execution_counts)
+        if not ready:
+            if running:
+                await asyncio.sleep(1)
+                continue
+            # No ready, no running — we're done or stuck
+            if failed:
+                unresolved = [n for n in failed if n not in completed]
+                if unresolved:
+                    await _fail_task(
+                        session, task,
+                        f"Graph execution stuck: stages {unresolved} failed with no redirect",
+                    )
+                    return
+            break  # All done
+
+        # Execute ready stages (parallel if multiple)
+        stage_index = len(completed) + len(skipped)
+        if len(ready) == 1:
+            node = ready[0]
+            stage = stage_map.get(node.name)
+            if not stage:
+                logger.warning("Stage %s in graph but not in task stages", node.name)
+                skipped.add(node.name)
+                continue
+
+            # Check condition
+            if _should_skip_stage(stage, stage_defs, structured_outputs):
+                stage.status = "skipped"
+                await session.commit()
+                skipped.add(node.name)
+                continue
+
+            execution_counts[node.name] += 1
+            stage.execution_count = execution_counts[node.name]
+            await session.commit()
+
+            result = await _execute_single_stage(
+                session, task, stage, stage_index,
+                prior_outputs, compression, project_memory_store,
+                repo_context, stage_defs, worktree_path, sandbox_info,
+            )
+            if result is None:
+                failed.add(node.name)
+                # Check for failure redirect
+                redirect = graph.get_failure_redirect(node.name)
+                if redirect and redirect in stage_map:
+                    logger.info(
+                        "Stage %s failed, redirecting to %s", node.name, redirect,
+                    )
+                    # Reset the redirect target for re-execution
+                    redirect_stage = stage_map[redirect]
+                    redirect_stage.status = "pending"
+                    redirect_stage.error_message = None
+                    redirect_stage.output_summary = None
+                    await session.commit()
+                    completed.discard(redirect)
+                    failed.discard(redirect)
+                else:
+                    await _fail_task(session, task, f"Stage {node.name} failed in graph")
+                    return
+                continue
+
+            completed.add(node.name)
+            prior_outputs.append({"stage": node.name, "output": result})
+            compressed = await _compress_with_log(task, stage, result)
+            if compressed is not None:
+                compression.add(compressed)
+            if stage.output_structured:
+                structured_outputs[node.name] = stage.output_structured
+
+            # Handle gates
+            gate_def = gates.get(node.name)
+            if gate_def:
+                gate_result = await _handle_gate_with_retry(
+                    session, task, stage, gate_def,
+                    result, stage_index, prior_outputs, compression,
+                    project_memory_store, repo_context, stage_defs,
+                    worktree_path, sandbox_info,
+                )
+                if gate_result is None:
+                    return
+        else:
+            # Parallel execution
+            tasks_async = {}
+            for node in ready:
+                stage = stage_map.get(node.name)
+                if not stage:
+                    skipped.add(node.name)
+                    continue
+                if _should_skip_stage(stage, stage_defs, structured_outputs):
+                    stage.status = "skipped"
+                    await session.commit()
+                    skipped.add(node.name)
+                    continue
+
+                execution_counts[node.name] += 1
+                stage.execution_count = execution_counts[node.name]
+                await session.commit()
+
+                coro = _execute_single_stage(
+                    session, task, stage, stage_index,
+                    prior_outputs, compression, project_memory_store,
+                    repo_context, stage_defs, worktree_path, sandbox_info,
+                )
+                tasks_async[node.name] = (stage, asyncio.create_task(coro))
+
+            for name, (stage, atask) in tasks_async.items():
+                try:
+                    result = await atask
+                except Exception as e:
+                    logger.exception("Graph parallel stage %s failed", name)
+                    await mark_stage_failed(session, task, stage, str(e), error=e)
+                    failed.add(name)
+                    continue
+
+                if result is None:
+                    failed.add(name)
+                    continue
+
+                completed.add(name)
+                prior_outputs.append({"stage": name, "output": result})
+                compressed = await _compress_with_log(task, stage, result)
+                if compressed is not None:
+                    compression.add(compressed)
+                if stage.output_structured:
+                    structured_outputs[name] = stage.output_structured
+
+    if iteration >= max_iterations:
+        await _fail_task(
+            session, task,
+            f"Graph execution exceeded max iterations ({max_iterations})",
+        )
+
+
 async def _execute_single_stage(
     session: AsyncSession,
     task: TaskModel,
@@ -746,14 +1018,18 @@ async def _execute_single_stage(
     stage_defs: Dict[str, dict],
     worktree_path: Optional[str] = None,
     sandbox_info=None,
+    gate_rejection_context: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Execute a single stage with model routing and retry context.
 
     Returns output text on success, None on failure (task is already marked failed).
     """
-    # Resolve per-stage model override from template
+    # Resolve per-stage overrides from template definition
     sdef = stage_defs.get(stage.stage_name, {})
     stage_model = sdef.get("model")  # None if not specified
+    custom_instruction = sdef.get("instruction")  # Phase 1.4
+    stage_timeout = sdef.get("timeout")  # Phase 1.4
+    evaluator_config = sdef.get("evaluator")  # Phase 2.2
 
     # Build project memory for the current role
     project_memory: Optional[str] = None
@@ -764,7 +1040,12 @@ async def _execute_single_stage(
             logger.warning("Failed to load memory for role %s", stage.agent_role, exc_info=True)
 
     # Build compressed prior context via sliding window
-    compressed_prior = compression.build_prior_context(stage_index)
+    # Phase 1.5: Cross-stage context recall — override compression for specified stages
+    context_from = sdef.get("context_from")
+    full_context_stages = set(context_from) if context_from else None
+    compressed_prior = compression.build_prior_context(
+        stage_index, full_context_stages=full_context_stages,
+    )
 
     # Build retry context if this stage previously failed (smart retry)
     retry_context: Optional[Dict[str, str]] = None
@@ -793,6 +1074,8 @@ async def _execute_single_stage(
                 repo_context=repo_context,
                 retry_context=retry_context,
                 stage_model=stage_model,
+                custom_instruction=custom_instruction,
+                gate_rejection_context=gate_rejection_context,
             )
         else:
             output = await execute_stage(
@@ -803,12 +1086,16 @@ async def _execute_single_stage(
                 retry_context=retry_context,
                 stage_model=stage_model,
                 workdir_override=effective_workdir,
+                custom_instruction=custom_instruction,
+                gate_rejection_context=gate_rejection_context,
+                stage_timeout=stage_timeout,
+                evaluator_config=evaluator_config,
             )
         return output
     except Exception as e:
         error_msg = str(e)
         logger.exception("Stage %s failed for task %s", stage.stage_name, task.id)
-        await mark_stage_failed(session, task, stage, error_msg)
+        await mark_stage_failed(session, task, stage, error_msg, error=e)
         from app.worker.agents import close_agents_for_task
         close_agents_for_task(str(task.id))
         await _fail_task(session, task, f"Stage {stage.stage_name} failed: {error_msg}")
@@ -918,16 +1205,428 @@ async def _check_circuit_breaker(
     return True
 
 
+async def _route_decision(
+    session: AsyncSession,
+    task: TaskModel,
+    stage: TaskStageModel,
+    routing_config: dict,
+    structured_outputs: Dict[str, dict],
+) -> Optional[str]:
+    """Phase 3.3: LLM-driven dynamic routing after a stage.
+
+    routing_config: {"options": [{"target": "code", "description": "..."}, ...]}
+
+    Returns the name of the next stage to route to, or None to continue normally.
+    """
+    if not settings.DYNAMIC_ROUTING_ENABLED:
+        return None
+
+    options = routing_config.get("options", [])
+    if not options:
+        return None
+
+    # Build routing prompt
+    stage_output = stage.output_summary or ""
+    structured = structured_outputs.get(stage.stage_name, {})
+
+    options_text = "\n".join(
+        f"- {opt['target']}: {opt.get('description', '')}"
+        for opt in options
+    )
+
+    try:
+        from app.integration.llm_client import ChatMessage, get_llm_client
+
+        model = settings.DYNAMIC_ROUTING_MODEL or settings.LLM_MODEL
+        client = get_llm_client()
+
+        prompt = (
+            f"你是一个任务路由决策器。根据【{stage.stage_name}】阶段的产出，"
+            f"决定下一步应该执行哪个阶段。\n\n"
+            f"阶段产出摘要: {structured.get('summary', stage_output[:500])}\n"
+            f"状态: {structured.get('status', 'unknown')}\n"
+            f"信心分数: {structured.get('confidence', 'N/A')}\n\n"
+            f"可选的下一阶段:\n{options_text}\n\n"
+            f"请只回复目标阶段名称（如 code、test 等），不要添加任何其他内容。"
+        )
+
+        resp = await client.chat(
+            messages=[ChatMessage(role="user", content=prompt)],
+            model=model,
+            temperature=0.1,
+            max_tokens=50,
+        )
+
+        decision = resp.content.strip().lower()
+
+        # Validate decision against options
+        valid_targets = {opt["target"] for opt in options}
+        if decision not in valid_targets:
+            logger.warning(
+                "Routing decision '%s' not in valid options %s",
+                decision, valid_targets,
+            )
+            return None
+
+        # Record decision for auditability
+        routing_decisions = task.routing_decisions or []
+        if isinstance(routing_decisions, list):
+            routing_decisions.append({
+                "after_stage": stage.stage_name,
+                "decision": decision,
+                "options": [opt["target"] for opt in options],
+                "structured_context": {
+                    "status": structured.get("status"),
+                    "confidence": structured.get("confidence"),
+                },
+            })
+            task.routing_decisions = routing_decisions
+            await session.commit()
+
+        logger.info(
+            "Routing decision after stage %s: → %s",
+            stage.stage_name, decision,
+        )
+        return decision
+
+    except Exception:
+        logger.warning(
+            "Dynamic routing failed after stage %s, continuing normally",
+            stage.stage_name, exc_info=True,
+        )
+        return None
+
+
+async def _check_interactive_planning(
+    session: AsyncSession,
+    task: TaskModel,
+    stage: TaskStageModel,
+    stage_output: str,
+) -> bool:
+    """Phase 3.2: Check if we should pause for interactive plan review after parse stage.
+
+    Returns True if the task was paused (caller should return), False to continue.
+    """
+    if not settings.INTERACTIVE_PLANNING_ENABLED:
+        return False
+
+    # Only trigger after parse stage
+    if stage.stage_name != "parse":
+        return False
+
+    # Check if template is in the interactive planning list
+    allowed_templates = {t.strip() for t in settings.INTERACTIVE_PLANNING_TEMPLATES.split(",") if t.strip()}
+    if task.template and task.template.name not in allowed_templates:
+        return False
+
+    # Store the plan from parse output
+    try:
+        plan_data = {"raw_output": stage_output[:5000], "stage": "parse"}
+        task.plan = plan_data
+    except Exception:
+        pass
+
+    # Set task to planning status
+    task.status = "planning"
+    await session.commit()
+
+    await _safe_broadcast(TASK_STATUS_CHANGED, {
+        "task_id": task.id,
+        "status": "planning",
+    })
+
+    # Create a plan review gate
+    gate = HumanGateModel(
+        gate_type="plan_review",
+        task_id=task.id,
+        agent_role="orchestrator",
+        status="pending",
+        content={
+            "stage": "parse",
+            "summary": stage_output[:500] if stage_output else "",
+            "type": "plan_review",
+        },
+    )
+    session.add(gate)
+    await session.commit()
+    await session.refresh(gate)
+
+    await _safe_broadcast(GATE_CREATED, {
+        "gate_id": gate.id,
+        "task_id": task.id,
+        "gate_type": "plan_review",
+        "stage_name": "parse",
+    })
+    await notify_gate_created(gate.id, task.id, "parse", "plan_review")
+
+    logger.info("Task %s paused for plan review (gate_id=%s)", task.id, gate.id)
+
+    # Poll for plan approval
+    gate_start = datetime.now(timezone.utc)
+    while _running:
+        await asyncio.sleep(settings.WORKER_GATE_POLL_INTERVAL)
+        elapsed = (datetime.now(timezone.utc) - gate_start).total_seconds()
+        if elapsed > settings.WORKER_GATE_MAX_WAIT_SECONDS:
+            await _fail_task(session, task, "Plan review timed out")
+            return True
+        try:
+            await session.refresh(gate)
+        except Exception:
+            continue
+
+        if gate.status == "approved":
+            # Resume execution
+            task.status = "running"
+            await session.commit()
+            await _safe_broadcast(TASK_STATUS_CHANGED, {
+                "task_id": task.id, "status": "running",
+            })
+            return False  # Continue execution
+
+        if gate.status in ("rejected", "revised"):
+            # If revised, update the plan; either way, re-run the parse stage
+            if gate.review_comment:
+                # Store revision feedback for next parse execution
+                stage.error_message = None
+                stage.output_summary = None
+                stage.status = "pending"
+                await session.commit()
+            task.status = "running"
+            await session.commit()
+            return False  # Will be re-executed in next iteration
+
+        if await _is_cancelled(session, task.id):
+            return True
+
+    return True
+
+
+def _should_skip_stage(
+    stage: TaskStageModel,
+    stage_defs: Dict[str, dict],
+    structured_outputs: Dict[str, dict],
+) -> bool:
+    """Phase 2.1: Check if a stage should be skipped based on conditions."""
+    sdef = stage_defs.get(stage.stage_name, {})
+    condition = sdef.get("condition")
+    if not condition:
+        return False
+
+    try:
+        from app.worker.conditions import evaluate_condition
+        should_execute = evaluate_condition(condition, structured_outputs)
+        if not should_execute:
+            logger.info(
+                "Stage %s skipped: condition not met (%s)",
+                stage.stage_name, condition,
+            )
+            return True
+    except Exception:
+        logger.warning(
+            "Failed to evaluate condition for stage %s, executing anyway",
+            stage.stage_name, exc_info=True,
+        )
+    return False
+
+
+async def _maybe_insert_dynamic_gate(
+    session: AsyncSession,
+    task: TaskModel,
+    stage: TaskStageModel,
+    stage_output: str,
+) -> bool:
+    """Phase 2.3: Insert dynamic gate when confidence is below threshold.
+
+    Returns True if a dynamic gate was inserted and approved.
+    """
+    if not settings.DYNAMIC_GATE_ENABLED:
+        return False
+
+    structured = stage.output_structured
+    if not structured or not isinstance(structured, dict):
+        return False
+
+    confidence = structured.get("confidence", 1.0)
+    if confidence >= settings.DYNAMIC_GATE_CONFIDENCE_THRESHOLD:
+        return False
+
+    logger.info(
+        "Stage %s confidence %.2f below threshold %.2f, inserting dynamic gate",
+        stage.stage_name, confidence, settings.DYNAMIC_GATE_CONFIDENCE_THRESHOLD,
+    )
+
+    gate = HumanGateModel(
+        gate_type="confidence_review",
+        task_id=task.id,
+        agent_role=stage.agent_role,
+        status="pending",
+        content={
+            "stage": stage.stage_name,
+            "summary": stage_output[:500] if stage_output else "",
+            "confidence": str(confidence),
+        },
+        is_dynamic=True,
+    )
+    session.add(gate)
+    await session.commit()
+    await session.refresh(gate)
+
+    await _safe_broadcast(GATE_CREATED, {
+        "gate_id": gate.id,
+        "task_id": task.id,
+        "gate_type": "confidence_review",
+        "stage_name": stage.stage_name,
+        "is_dynamic": True,
+    })
+    await notify_gate_created(gate.id, task.id, stage.stage_name, "confidence_review")
+
+    # Poll until resolved (reuse existing gate polling logic)
+    gate_start = datetime.now(timezone.utc)
+    while _running:
+        await asyncio.sleep(settings.WORKER_GATE_POLL_INTERVAL)
+        elapsed = (datetime.now(timezone.utc) - gate_start).total_seconds()
+        if elapsed > settings.WORKER_GATE_MAX_WAIT_SECONDS:
+            return False
+        try:
+            await session.refresh(gate)
+        except Exception:
+            continue
+        if gate.status in ("approved", "revised"):
+            return True
+        if gate.status == "rejected":
+            return False
+        if await _is_cancelled(session, task.id):
+            return False
+    return False
+
+
+async def _handle_gate_with_retry(
+    session: AsyncSession,
+    task: TaskModel,
+    stage: TaskStageModel,
+    gate_def: dict,
+    stage_output: str,
+    stage_index: int,
+    prior_outputs: List[Dict[str, str]],
+    compression: CompressionResult,
+    project_memory_store,
+    repo_context: Optional[str],
+    stage_defs: Dict[str, dict],
+    worktree_path: Optional[str] = None,
+    sandbox_info=None,
+) -> Optional[str]:
+    """Handle gate with retry loop for rejected gates (Phase 1.3).
+
+    Returns the final stage output on success, or None if the task should fail.
+    """
+    gate_type = gate_def["type"]
+    max_retries = gate_def.get("max_retries", 0)
+    current_retry = 0
+
+    while True:
+        gate_result = await _handle_gate(
+            session, task, stage, gate_type, stage_output,
+            max_retries=max_retries, current_retry=current_retry,
+        )
+        result_status = gate_result["result"]
+
+        if result_status == "approved":
+            return stage_output
+
+        if result_status == "revised":
+            # Phase 2.4: re-execute with revision context
+            gate_rejection_ctx = {
+                "comment": gate_result.get("comment", ""),
+                "revised_content": gate_result.get("revised_content", ""),
+                "retry": f"{current_retry + 1}/{max_retries}",
+            }
+            current_retry += 1
+            # Reset stage for re-execution
+            stage.status = "pending"
+            stage.output_summary = None
+            stage.error_message = None
+            await session.commit()
+            new_output = await _execute_single_stage(
+                session, task, stage, stage_index,
+                prior_outputs, compression, project_memory_store,
+                repo_context, stage_defs, worktree_path, sandbox_info,
+                gate_rejection_context=gate_rejection_ctx,
+            )
+            if new_output is None:
+                return None
+            stage_output = new_output
+            # Update prior_outputs with new result
+            for po in prior_outputs:
+                if po["stage"] == stage.stage_name:
+                    po["output"] = new_output
+                    break
+            continue
+
+        if result_status == "rejected":
+            if current_retry < max_retries:
+                # Phase 1.3: Re-execute with rejection feedback
+                logger.info(
+                    "Gate rejected for stage %s, retry %d/%d with feedback",
+                    stage.stage_name, current_retry + 1, max_retries,
+                )
+                gate_rejection_ctx = {
+                    "comment": gate_result.get("comment", ""),
+                    "retry": f"{current_retry + 1}/{max_retries}",
+                }
+                current_retry += 1
+                # Reset stage for re-execution
+                stage.status = "pending"
+                stage.output_summary = None
+                stage.error_message = None
+                await session.commit()
+                new_output = await _execute_single_stage(
+                    session, task, stage, stage_index,
+                    prior_outputs, compression, project_memory_store,
+                    repo_context, stage_defs, worktree_path, sandbox_info,
+                    gate_rejection_context=gate_rejection_ctx,
+                )
+                if new_output is None:
+                    return None
+                stage_output = new_output
+                # Update prior_outputs with new result
+                for po in prior_outputs:
+                    if po["stage"] == stage.stage_name:
+                        po["output"] = new_output
+                        break
+                continue
+            else:
+                # No retries left — fail the task
+                await _fail_task(
+                    session, task,
+                    f"Gate rejected after stage {stage.stage_name} "
+                    f"(exhausted {max_retries} retries)",
+                )
+                return None
+
+        # timeout, cancelled, or other — fail
+        await _fail_task(
+            session, task,
+            f"Gate {result_status} after stage {stage.stage_name}",
+        )
+        return None
+
+
 async def _handle_gate(
     session: AsyncSession,
     task: TaskModel,
     stage: TaskStageModel,
     gate_type: str,
     stage_output: str,
-) -> bool:
-    """Create a gate and poll until it is approved or rejected.
+    max_retries: int = 0,
+    current_retry: int = 0,
+) -> dict:
+    """Create a gate and poll until it is approved, rejected, or revised.
 
-    Returns True if approved, False if rejected.
+    Returns dict with keys:
+      - "result": "approved" | "rejected" | "revised" | "timeout" | "cancelled"
+      - "comment": reviewer's comment (if rejected/revised)
+      - "revised_content": revision text (if revised, Phase 2.4)
+      - "retry_count": current retry number
     """
     gate_corr = f"gate-wait-{uuid.uuid4().hex}"
     gate_started_at = time.monotonic()
@@ -949,6 +1648,7 @@ async def _handle_gate(
             "stage": stage.stage_name,
             "summary": stage_output[:500] if stage_output else "",
         },
+        retry_count=current_retry,
     )
     session.add(gate)
     await session.commit()
@@ -999,7 +1699,7 @@ async def _handle_gate(
                 status="cancelled",
                 result="gate_wait_timeout",
             )
-            return False
+            return {"result": "timeout", "comment": "", "retry_count": current_retry}
 
         # Re-read gate status from DB (with error handling)
         try:
@@ -1025,7 +1725,7 @@ async def _handle_gate(
                 started_at_monotonic=gate_started_at,
                 status="success",
             )
-            return True
+            return {"result": "approved", "comment": gate.review_comment or "", "retry_count": current_retry}
         elif gate.status == "rejected":
             logger.info("Gate %s rejected", gate.id)
             duration_ms = round((time.monotonic() - gate_started_at) * 1000, 2)
@@ -1044,7 +1744,36 @@ async def _handle_gate(
                 status="failed",
                 result="gate_rejected",
             )
-            return False
+            return {
+                "result": "rejected",
+                "comment": gate.review_comment or "",
+                "retry_count": current_retry,
+            }
+        elif gate.status == "revised":
+            # Phase 2.4: Gate "revise and continue" mode
+            logger.info("Gate %s revised", gate.id)
+            duration_ms = round((time.monotonic() - gate_started_at) * 1000, 2)
+            await _emit_system_log(
+                task,
+                stage=stage,
+                event_type="gate_wait_revised",
+                status="success",
+                correlation_id=gate_corr,
+                duration_ms=duration_ms,
+                response_body={"gate_id": gate.id},
+            )
+            await _close_started_system_log(
+                started_log_id=gate_started_log_id,
+                started_at_monotonic=gate_started_at,
+                status="success",
+                result="gate_revised",
+            )
+            return {
+                "result": "revised",
+                "comment": gate.review_comment or "",
+                "revised_content": gate.revised_content or "",
+                "retry_count": current_retry,
+            }
 
         # Also check for task cancellation during gate wait
         if await _is_cancelled(session, task.id):
@@ -1065,7 +1794,7 @@ async def _handle_gate(
                 status="cancelled",
                 result="task_cancelled",
             )
-            return False
+            return {"result": "cancelled", "comment": "", "retry_count": current_retry}
 
     # Worker shutting down
     duration_ms = round((time.monotonic() - gate_started_at) * 1000, 2)
@@ -1084,7 +1813,7 @@ async def _handle_gate(
         status="cancelled",
         result="worker_stopped",
     )
-    return False
+    return {"result": "cancelled", "comment": "", "retry_count": current_retry}
 
 
 async def _is_cancelled(session: AsyncSession, task_id: str) -> bool:
@@ -1096,10 +1825,10 @@ async def _is_cancelled(session: AsyncSession, task_id: str) -> bool:
     return status == "cancelled"
 
 
-def _parse_gates(task: TaskModel) -> Dict[str, str]:
+def _parse_gates(task: TaskModel) -> Dict[str, dict]:
     """Parse gate definitions from template.gates JSON.
 
-    Returns {after_stage_name: gate_type}.
+    Returns {after_stage_name: {"type": gate_type, "max_retries": int}}.
     """
     if not task.template:
         return {}
@@ -1112,8 +1841,9 @@ def _parse_gates(task: TaskModel) -> Dict[str, str]:
     for g in gates_json:
         after_stage = g.get("after_stage")
         gate_type = g.get("type", "human_approve")
+        max_retries = g.get("max_retries", settings.GATE_DEFAULT_MAX_RETRIES)
         if after_stage:
-            result[after_stage] = gate_type
+            result[after_stage] = {"type": gate_type, "max_retries": max_retries}
     return result
 
 

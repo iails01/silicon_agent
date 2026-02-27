@@ -17,6 +17,7 @@ const STATUS_COLOR: Record<string, string> = {
   failed: 'error',
   cancelled: 'warning',
   skipped: 'default',
+  planning: 'warning',
 };
 
 const STAGE_DISPLAY: Record<string, string> = Object.fromEntries(
@@ -154,6 +155,50 @@ const TaskDetail: React.FC = () => {
                   </Space>
                 }
               >
+                {/* Phase 1.1: Structured output badges */}
+                {stage.output_structured && (
+                  <div style={{ marginBottom: 12 }}>
+                    <Space wrap>
+                      <Tag color={stage.output_structured.status === 'pass' ? 'green' : stage.output_structured.status === 'fail' ? 'red' : 'orange'}>
+                        {stage.output_structured.status}
+                      </Tag>
+                      {stage.output_structured.confidence != null && (
+                        <Tag color={stage.output_structured.confidence >= 0.7 ? 'green' : stage.output_structured.confidence >= 0.5 ? 'orange' : 'red'}>
+                          信心: {Math.round(stage.output_structured.confidence * 100)}%
+                        </Tag>
+                      )}
+                      {/* Stage-specific badges */}
+                      {(stage.output_structured as Record<string, unknown>).tests_passed != null && (
+                        <Tag color="green">通过: {String((stage.output_structured as Record<string, unknown>).tests_passed)}</Tag>
+                      )}
+                      {(stage.output_structured as Record<string, unknown>).tests_failed != null && Number((stage.output_structured as Record<string, unknown>).tests_failed) > 0 && (
+                        <Tag color="red">失败: {String((stage.output_structured as Record<string, unknown>).tests_failed)}</Tag>
+                      )}
+                      {(stage.output_structured as Record<string, unknown>).issues_critical != null && Number((stage.output_structured as Record<string, unknown>).issues_critical) > 0 && (
+                        <Tag color="red">Critical: {String((stage.output_structured as Record<string, unknown>).issues_critical)}</Tag>
+                      )}
+                      {(stage.output_structured as Record<string, unknown>).issues_major != null && Number((stage.output_structured as Record<string, unknown>).issues_major) > 0 && (
+                        <Tag color="orange">Major: {String((stage.output_structured as Record<string, unknown>).issues_major)}</Tag>
+                      )}
+                      {stage.output_structured.artifacts && stage.output_structured.artifacts.length > 0 && (
+                        <Tag>{stage.output_structured.artifacts.length} 文件</Tag>
+                      )}
+                    </Space>
+                    {stage.output_structured.summary && (
+                      <div style={{ marginTop: 4, color: '#666', fontSize: 13 }}>
+                        {stage.output_structured.summary}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Phase 1.2: Failure category badge */}
+                {stage.failure_category && (
+                  <Tag color="volcano" style={{ marginBottom: 8 }}>{stage.failure_category}</Tag>
+                )}
+                {/* Phase 2.5: Retry count */}
+                {stage.retry_count > 0 && (
+                  <Tag style={{ marginBottom: 8 }}>重试 {stage.retry_count}</Tag>
+                )}
                 {stage.output_summary ? (
                   <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
                     {stage.output_summary}
@@ -180,6 +225,10 @@ const TaskDetail: React.FC = () => {
                   </div>
                 ) : stage.status === 'running' ? (
                   <StageLiveLog stageId={stage.id} />
+                ) : stage.status === 'skipped' ? (
+                  <div style={{ color: '#999', fontStyle: 'italic', textDecoration: 'line-through' }}>
+                    条件不满足，阶段已跳过
+                  </div>
                 ) : (
                   <Empty description="暂无产出" />
                 )}

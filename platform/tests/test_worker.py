@@ -46,7 +46,7 @@ class TestParseGates:
         tmpl = _make_template(gates_json=json.dumps(gates))
         task = _make_task(template=tmpl)
         result = _parse_gates(task)
-        assert result == {"coding": "human_approve"}
+        assert result == {"coding": {"type": "human_approve", "max_retries": 2}}
 
 
 class TestSortStages:

@@ -8,6 +8,7 @@ from app.schemas.template import (
     TemplateListResponse,
     TemplateResponse,
     TemplateUpdateRequest,
+    TemplateVersionListResponse,
 )
 from app.services.template_service import TemplateService
 
@@ -50,6 +51,14 @@ async def update_template(
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
     return template
+
+
+@router.get("/by-name/{name}/versions", response_model=TemplateVersionListResponse)
+async def list_template_versions(
+    name: str,
+    service: TemplateService = Depends(get_template_service),
+):
+    return await service.list_versions(name)
 
 
 @router.delete("/{template_id}", status_code=204)

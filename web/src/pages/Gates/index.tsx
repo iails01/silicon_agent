@@ -1,6 +1,6 @@
 import React from 'react';
 import { Row, Col, Typography, Spin, Empty, Segmented, message } from 'antd';
-import { useGateList, useApproveGate, useRejectGate } from '@/hooks/useGates';
+import { useGateList, useApproveGate, useRejectGate, useReviseGate } from '@/hooks/useGates';
 import GateApprovalCard from '@/components/GateApprovalCard';
 
 const { Title } = Typography;
@@ -10,6 +10,7 @@ const GatesPage: React.FC = () => {
   const { data: gates, isLoading } = useGateList({ status: statusFilter });
   const approveGate = useApproveGate();
   const rejectGate = useRejectGate();
+  const reviseGate = useReviseGate();
 
   const handleApprove = async (id: string, comment?: string) => {
     await approveGate.mutateAsync({ id, req: comment ? { comment } : undefined });
@@ -19,6 +20,14 @@ const GatesPage: React.FC = () => {
   const handleReject = async (id: string, comment: string) => {
     await rejectGate.mutateAsync({ id, req: { comment } });
     message.success('Gate rejected');
+  };
+
+  const handleRevise = async (id: string, comment: string, revisedContent?: string) => {
+    await reviseGate.mutateAsync({
+      id,
+      req: { comment, revised_content: revisedContent },
+    });
+    message.success('Revision submitted — stage will re-execute');
   };
 
   return (
@@ -32,6 +41,7 @@ const GatesPage: React.FC = () => {
             { label: 'Pending', value: 'pending' },
             { label: 'Approved', value: 'approved' },
             { label: 'Rejected', value: 'rejected' },
+            { label: 'Revised', value: 'revised' },
             { label: 'All', value: '' },
           ]}
         />
@@ -49,7 +59,8 @@ const GatesPage: React.FC = () => {
                 gate={gate}
                 onApprove={handleApprove}
                 onReject={handleReject}
-                loading={approveGate.isPending || rejectGate.isPending}
+                onRevise={handleRevise}
+                loading={approveGate.isPending || rejectGate.isPending || reviseGate.isPending}
               />
             </Col>
           ))}

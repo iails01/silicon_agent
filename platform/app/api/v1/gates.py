@@ -5,9 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.dependencies import get_gate_service
-from app.schemas.gate import GateApproveRequest, GateDetailResponse, GateListResponse, GateRejectRequest
+from app.schemas.gate import GateApproveRequest, GateDetailResponse, GateListResponse, GateRejectRequest, GateReviseRequest
 from app.services.gate_service import GateService
-from app.websocket.events import GATE_APPROVED, GATE_REJECTED
+from app.websocket.events import GATE_APPROVED, GATE_REJECTED, GATE_REVISED
 from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/gates", tags=["gates"])
@@ -63,4 +63,18 @@ async def reject_gate(
     if gate is None:
         raise HTTPException(status_code=404, detail="Gate not found")
     await ws_manager.broadcast(GATE_REJECTED, {"gate_id": gate_id, "reviewer": request.reviewer})
+    return gate
+
+
+@router.post("/{gate_id}/revise", response_model=GateDetailResponse)
+async def revise_gate(
+    gate_id: str,
+    request: GateReviseRequest,
+    service: GateService = Depends(get_gate_service),
+):
+    """Phase 2.4: Revise and continue — approve with modifications."""
+    gate = await service.revise(gate_id, request)
+    if gate is None:
+        raise HTTPException(status_code=404, detail="Gate not found")
+    await ws_manager.broadcast(GATE_REVISED, {"gate_id": gate_id, "reviewer": request.reviewer})
     return gate

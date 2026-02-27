@@ -627,6 +627,16 @@ async def _finalize_stage_success(
     stage.duration_seconds = round(elapsed, 2)
     stage.tokens_used = total_tokens
     stage.output_summary = output
+
+    # Phase 1.1: Extract structured output from raw text
+    try:
+        from app.worker.contracts import extract_structured_output
+        structured = await extract_structured_output(stage.stage_name, output)
+        if structured:
+            stage.output_structured = structured
+    except Exception:
+        logger.warning("Structured extraction failed for stage %s", stage.stage_name, exc_info=True)
+
     await session.commit()
 
     task.total_tokens += total_tokens
@@ -679,6 +689,10 @@ async def execute_stage(
     retry_context: Optional[Dict[str, str]] = None,
     stage_model: Optional[str] = None,
     workdir_override: Optional[str] = None,
+    custom_instruction: Optional[str] = None,
+    gate_rejection_context: Optional[Dict[str, str]] = None,
+    stage_timeout: Optional[float] = None,
+    evaluator_config: Optional[dict] = None,
 ) -> str:
     """Execute a single stage: call AgentRunner and update DB/broadcast."""
     now = datetime.now(timezone.utc)
@@ -727,6 +741,8 @@ async def execute_stage(
         project_memory=project_memory,
         repo_context=repo_context,
         retry_context=retry_context,
+        custom_instruction=custom_instruction,
+        gate_rejection_context=gate_rejection_context,
     )
     user_prompt = build_user_prompt(ctx)
 
@@ -892,8 +908,100 @@ async def execute_stage(
         runner, output, runtime_overrides, tracker
     )
 
+    # Phase 2.2: Evaluator-optimizer loop (if configured for this stage)
+    if evaluator_config and evaluator_config.get("enabled"):
+        output, total_tokens = await _run_evaluator_loop_inner(
+            runner, output, total_tokens, stage, runtime_overrides,
+            evaluator_config,
+        )
+
     await _finalize_stage_success(session, task, stage, agent, output, total_tokens, elapsed)
     return output
+
+
+
+async def _run_evaluator_loop_inner(
+    runner: Any,
+    output: str,
+    total_tokens: int,
+    stage: TaskStageModel,
+    runtime_overrides: dict[str, Any],
+    evaluator_config: dict,
+) -> tuple[str, int]:
+    """Inner evaluator loop implementation.
+
+    evaluator_config: {
+        "enabled": True,
+        "max_iterations": 3,
+        "criteria": "代码质量、完整性、可维护性",
+        "min_confidence": 0.7,
+    }
+    """
+    max_iterations = evaluator_config.get("max_iterations", settings.EVALUATOR_MAX_ITERATIONS)
+    min_confidence = evaluator_config.get("min_confidence", settings.EVALUATOR_DEFAULT_MIN_CONFIDENCE)
+    criteria = evaluator_config.get("criteria", "产出质量、完整性、准确性")
+
+    for iteration in range(max_iterations):
+        # Step 1: Evaluate current output
+        eval_prompt = (
+            f"请评估你刚才在【{stage.stage_name}】阶段的产出质量。\n"
+            f"评估标准: {criteria}\n\n"
+            f"请以 JSON 格式回复（不要添加代码块标记）：\n"
+            '{"confidence": 0.0到1.0的信心分数, '
+            '"issues": ["发现的问题列表"], '
+            '"suggestions": ["改进建议"]}'
+        )
+        chat_kwargs = _chat_kwargs_for_runner(runner, runtime_overrides)
+        try:
+            eval_response = await asyncio.wait_for(
+                runner.chat(eval_prompt, reset=False, **chat_kwargs),
+                timeout=settings.WORKER_STAGE_TIMEOUT,
+            )
+            eval_text = eval_response.text_content
+            total_tokens = runner.cumulative_usage.total_tokens
+        except Exception:
+            logger.warning("Evaluator prompt failed for stage %s", stage.stage_name, exc_info=True)
+            break
+
+        # Parse confidence
+        import json as _json
+        confidence = min_confidence  # Default to threshold
+        try:
+            eval_data = _json.loads(eval_text.strip())
+            confidence = float(eval_data.get("confidence", min_confidence))
+        except (ValueError, _json.JSONDecodeError):
+            logger.warning("Failed to parse evaluator response for stage %s", stage.stage_name)
+            break
+
+        # Store self-assessment score
+        stage.self_assessment_score = confidence
+
+        logger.info(
+            "Evaluator iteration %d for stage %s: confidence=%.2f (min=%.2f)",
+            iteration + 1, stage.stage_name, confidence, min_confidence,
+        )
+
+        if confidence >= min_confidence:
+            break
+
+        # Step 2: Improve based on evaluation
+        improve_prompt = (
+            f"你的自评信心分数为 {confidence:.2f}（最低要求 {min_confidence:.2f}）。\n"
+            f"发现的问题: {eval_text}\n\n"
+            "请根据上述评估改进你的产出，输出完整的改进版本。"
+        )
+        try:
+            improve_response = await asyncio.wait_for(
+                runner.chat(improve_prompt, reset=False, **chat_kwargs),
+                timeout=settings.WORKER_STAGE_TIMEOUT,
+            )
+            output = improve_response.text_content
+            total_tokens = runner.cumulative_usage.total_tokens
+        except Exception:
+            logger.warning("Improvement prompt failed for stage %s", stage.stage_name, exc_info=True)
+            break
+
+    return output, total_tokens
 
 
 async def mark_stage_failed(
@@ -901,11 +1009,21 @@ async def mark_stage_failed(
     task: TaskModel,
     stage: TaskStageModel,
     error_message: str,
+    error: Exception | None = None,
 ) -> None:
-    """Mark a stage as failed and reset the agent."""
+    """Mark a stage as failed, classify the failure, and reset the agent."""
+    from app.worker.failure import classify_failure
+
     stage.status = "failed"
     stage.error_message = error_message
     stage.completed_at = datetime.now(timezone.utc)
+    # Phase 1.2: Classify the failure for recovery routing
+    category = classify_failure(
+        error=error,
+        error_message=error_message,
+        output=stage.output_summary,
+    )
+    stage.failure_category = category.value
     await session.commit()
 
     agent = await _get_agent(session, stage.agent_role)
@@ -953,6 +1071,8 @@ async def execute_stage_sandboxed(
     repo_context: Optional[str] = None,
     retry_context: Optional[Dict[str, str]] = None,
     stage_model: Optional[str] = None,
+    custom_instruction: Optional[str] = None,
+    gate_rejection_context: Optional[Dict[str, str]] = None,
 ) -> str:
     """Execute a stage inside a sandbox container via HTTP.
 
@@ -1006,6 +1126,8 @@ async def execute_stage_sandboxed(
         project_memory=project_memory,
         repo_context=repo_context,
         retry_context=retry_context,
+        custom_instruction=custom_instruction,
+        gate_rejection_context=gate_rejection_context,
     )
     user_prompt = build_user_prompt(ctx)
     system_prompt = SYSTEM_PROMPTS.get(stage.agent_role, SYSTEM_PROMPTS["orchestrator"])

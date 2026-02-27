@@ -1,5 +1,5 @@
 import api from './api';
-import type { Gate, GateApproveRequest, GateRejectRequest } from '@/types/gate';
+import type { Gate, GateApproveRequest, GateRejectRequest, GateReviseRequest } from '@/types/gate';
 
 export async function listGates(params?: {
   status?: string;
@@ -21,6 +21,11 @@ export async function approveGate(id: string, req?: GateApproveRequest): Promise
 
 export async function rejectGate(id: string, req: GateRejectRequest): Promise<Gate> {
   const { data } = await api.post<Gate>(`/gates/${id}/reject`, req);
+  return data;
+}
+
+export async function reviseGate(id: string, req: GateReviseRequest): Promise<Gate> {
+  const { data } = await api.post<Gate>(`/gates/${id}/revise`, req);
   return data;
 }
 
