@@ -9,7 +9,7 @@ Example condition in template:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from app.config import settings
 

@@ -15,12 +15,17 @@ import app.models.audit  # noqa: F401
 import app.models.template  # noqa: F401
 import app.models.project  # noqa: F401
 import app.models.task_log  # noqa: F401
+import app.models.skill_feedback  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 
 def _add_missing_columns(connection) -> None:
-    """Add columns defined in models but missing from existing DB tables."""
+    """Add columns defined in models but missing from existing DB tables.
+
+    After adding a column, backfill NULL rows with the column's Python-level
+    default so that NOT NULL / schema constraints are satisfied.
+    """
     inspector = inspect(connection)
     for table_name, table in Base.metadata.tables.items():
         if not inspector.has_table(table_name):
@@ -32,6 +37,21 @@ def _add_missing_columns(connection) -> None:
                 stmt = f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}"
                 connection.execute(text(stmt))
                 logger.info("Added missing column: %s.%s (%s)", table_name, col.name, col_type)
+
+                # Backfill NULL values with the Python-level default
+                default_val = None
+                if col.default is not None and col.default.is_scalar:
+                    default_val = col.default.arg
+                if default_val is not None:
+                    update_stmt = (
+                        f"UPDATE {table_name} SET {col.name} = :val"
+                        f" WHERE {col.name} IS NULL"
+                    )
+                    connection.execute(text(update_stmt), {"val": default_val})
+                    logger.info(
+                        "Backfilled %s.%s NULL rows with default=%r",
+                        table_name, col.name, default_val,
+                    )
 
 
 async def init_db(engine: AsyncEngine) -> None:

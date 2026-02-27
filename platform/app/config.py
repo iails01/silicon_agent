@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     SANDBOX_AGENT_PORT: int = 9090
     SANDBOX_READONLY_ROOT: bool = True
     SANDBOX_MAX_CONCURRENT: int = 4
+    SANDBOX_WORKSPACE_BASE_DIR: str = "/tmp/silicon_agent/tasks"
+    SANDBOX_FALLBACK_MODE: str = "graceful"
 
     # Memory & compression configuration
     MEMORY_ENABLED: bool = True
@@ -108,6 +110,11 @@ class Settings(BaseSettings):
     DYNAMIC_ROUTING_ENABLED: bool = False
     DYNAMIC_ROUTING_MODEL: str = ""
     TEMPLATE_VERSIONING_ENABLED: bool = False
+
+    # Skill self-learning (Phase 1)
+    SKILL_FEEDBACK_ENABLED: bool = True       # Enable skill effectiveness metrics
+    SKILL_REFLECTION_ENABLED: bool = True     # Enable structured reflection on failure
+    SKILL_REFLECTION_MODEL: str = ""          # Model for reflection (empty = default)
 
     # Task log pipeline
     TASK_LOG_PIPELINE_QUEUE_SIZE: int = 4000

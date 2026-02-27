@@ -181,6 +181,13 @@ def build_user_prompt(ctx: StageContext) -> str:
         parts.append("\n## ⚠ 重试上下文（上次执行失败）")
         if error:
             parts.append(f"**失败原因:** {error}")
+        # Structured reflection fields (from generate_structured_reflection)
+        lesson = ctx.retry_context.get("lesson", "")
+        if lesson:
+            parts.append(f"**教训:** {lesson}")
+        suggestion = ctx.retry_context.get("suggestion", "")
+        if suggestion:
+            parts.append(f"**建议:** {suggestion}")
         if prior_output:
             # Truncate to avoid bloating context
             truncated = prior_output[:2000]
