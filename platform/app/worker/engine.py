@@ -275,6 +275,7 @@ async def _setup_worktree(task: TaskModel) -> tuple[Optional[str], Any]:
             task_id=str(task.id),
             task_title=task.title,
             base_branch=task.project.branch or "main",
+            target_branch=task.target_branch,
         )
         if worktree_path:
             logger.info("Task %s using worktree: %s", task.id, worktree_path)
@@ -428,6 +429,7 @@ async def _finalize_task_resources(
             branch = await worktree_mgr.commit_and_push(
                 task_id=str(task.id),
                 commit_message=f"feat: {task.title}\n\nTask-ID: {task.id}",
+                target_branch=task.target_branch,
             )
             duration_ms = round((time.monotonic() - worktree_commit_started_at) * 1000, 2)
             await _emit_system_log(
