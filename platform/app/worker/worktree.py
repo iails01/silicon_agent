@@ -74,6 +74,7 @@ class WorktreeManager:
         task_id: str,
         task_title: str = "",
         base_branch: str = "main",
+        target_branch: Optional[str] = None,
     ) -> Optional[str]:
         """Create an isolated git worktree for a task.
 
@@ -83,7 +84,7 @@ class WorktreeManager:
             logger.error("Repo path does not exist: %s", self.repo_path)
             return None
 
-        branch_name = _sanitize_branch_name(task_id, task_title)
+        branch_name = (target_branch or "").strip() or _sanitize_branch_name(task_id, task_title)
         worktree_path = self.base_dir / task_id
 
         if worktree_path.exists():
@@ -93,11 +94,28 @@ class WorktreeManager:
         # Fetch latest from remote (best-effort, with retry)
         await _run_with_retry("git fetch origin", cwd=str(self.repo_path))
 
-        # Create worktree with new branch from base
-        rc, out, err = await _run(
-            f"git worktree add -b {branch_name} {worktree_path} origin/{base_branch}",
-            cwd=str(self.repo_path),
-        )
+        # If target branch exists remotely, work on that branch directly.
+        if target_branch:
+            rc, _, _ = await _run(
+                f"git rev-parse --verify --quiet origin/{branch_name}",
+                cwd=str(self.repo_path),
+            )
+            if rc == 0:
+                rc, out, err = await _run(
+                    f"git worktree add -B {branch_name} {worktree_path} origin/{branch_name}",
+                    cwd=str(self.repo_path),
+                )
+            else:
+                rc, out, err = await _run(
+                    f"git worktree add -b {branch_name} {worktree_path} origin/{base_branch}",
+                    cwd=str(self.repo_path),
+                )
+        else:
+            # Create worktree with new branch from base
+            rc, out, err = await _run(
+                f"git worktree add -b {branch_name} {worktree_path} origin/{base_branch}",
+                cwd=str(self.repo_path),
+            )
 
         if rc != 0:
             # Branch might already exist, try without -b
@@ -177,7 +195,7 @@ class WorktreeManager:
         return cleaned
 
     async def commit_and_push(
-        self, task_id: str, commit_message: str,
+        self, task_id: str, commit_message: str, target_branch: Optional[str] = None,
     ) -> Optional[str]:
         """Stage all changes, commit, and push in the task's worktree.
 
@@ -212,21 +230,24 @@ class WorktreeManager:
             logger.error("git commit failed for task %s: %s", task_id, err)
             return None
 
-        # Push to remote
+        # Push to remote branch. If target_branch is set, push HEAD to it.
         rc, branch, _ = await _run("git branch --show-current", cwd=cwd)
         if rc != 0:
             return None
 
-        rc, _, err = await _run_with_retry(
-            f"git push -u origin {branch}",
-            cwd=cwd,
-        )
+        push_branch = (target_branch or "").strip() or branch
+        if push_branch == branch:
+            push_cmd = f"git push -u origin {branch}"
+        else:
+            push_cmd = f"git push -u origin HEAD:{push_branch}"
+
+        rc, _, err = await _run_with_retry(push_cmd, cwd=cwd)
         if rc != 0:
             logger.error("git push failed for task %s after retries: %s", task_id, err)
             return None
 
-        logger.info("Committed and pushed for task %s on branch %s", task_id, branch)
-        return branch
+        logger.info("Committed and pushed for task %s on branch %s", task_id, push_branch)
+        return push_branch
 
     async def create_pr(
         self,

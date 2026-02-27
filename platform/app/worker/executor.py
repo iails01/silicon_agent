@@ -127,6 +127,53 @@ def _append_output_summary(existing: str, chunk: str) -> tuple[str, bool]:
     return merged[:keep_len] + marker, True
 
 
+def _clip_text(value: str, limit: int) -> str:
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 15)].rstrip() + "...[truncated]"
+
+
+def _is_signoff_stage(stage_name: str) -> bool:
+    lowered = (stage_name or "").lower()
+    return lowered == "signoff" or "signoff" in lowered or "签收" in (stage_name or "")
+
+
+def _format_tool_digest(tool_items: list[dict[str, str]], limit: int = 6) -> str:
+    if not tool_items:
+        return ""
+    lines: list[str] = []
+    for item in tool_items[-limit:]:
+        status = str(item.get("status") or "success").upper()
+        command = _clip_text(str(item.get("command") or "tool"), 140)
+        preview = _clip_text(str(item.get("result_preview") or ""), 260)
+        line = f"- [{status}] {command}"
+        if preview:
+            line += f"\n  结果: {preview}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _resolve_stage_output_summary(
+    stage_name: str,
+    output: str,
+    tool_items: list[dict[str, str]],
+) -> str:
+    resolved = (output or "").strip()
+    if not resolved:
+        resolved = _format_tool_digest(tool_items)
+
+    if _is_signoff_stage(stage_name):
+        digest = _format_tool_digest(tool_items)
+        if digest:
+            if resolved:
+                resolved = f"{resolved}\n\n## Signoff Summary\n{digest}"
+            else:
+                resolved = f"## Signoff Summary\n{digest}"
+
+    return _clip_text(resolved, 50_000)
+
+
 # ---------------------------------------------------------------------------
 # Module-level helpers extracted from execute_stage
 # ---------------------------------------------------------------------------
@@ -180,6 +227,7 @@ class StageEventTracker:
         self._handler_source = f"stage-log:{task_id}:{stage_id}:{uuid.uuid4().hex}"
         self._instrumented_runners: list[Any] = []
         self._instrumented_runner_ids: set[int] = set()
+        self._completed_tool_runs: list[dict[str, str]] = []
 
     # -- public emit helpers --------------------------------------------------
 
@@ -262,6 +310,9 @@ class StageEventTracker:
         )
         if self._active_chat_correlation_id == correlation_id:
             self._active_chat_correlation_id = None
+
+    def get_completed_tool_runs(self) -> list[dict[str, str]]:
+        return list(self._completed_tool_runs)
 
     # -- runner event registration -------------------------------------------
 
@@ -363,6 +414,7 @@ class StageEventTracker:
                 command=_summarize_tool_command(tool_name, args),
                 command_args={"tool_name": tool_name, **args},
                 workspace=workspace,
+                execution_mode="in_process",
                 missing_fields=missing_fields,
                 priority="high",
             )
@@ -371,6 +423,7 @@ class StageEventTracker:
                 "started": time.monotonic(),
                 "summary": "",
                 "truncated": False,
+                "command": _summarize_tool_command(tool_name, args),
             }
 
         async def _on_tool_execution_update(event: Any) -> None:
@@ -421,6 +474,15 @@ class StageEventTracker:
                     },
                     priority="high",
                 )
+                tracker._completed_tool_runs.append(
+                    {
+                        "status": status,
+                        "command": str(run_info.get("command") or _summarize_tool_command(tool_name, args)),
+                        "result_preview": output_summary,
+                    }
+                )
+                if len(tracker._completed_tool_runs) > 20:
+                    tracker._completed_tool_runs = tracker._completed_tool_runs[-20:]
                 await _safe_broadcast(
                     TASK_LOG_STREAM_UPDATE,
                     {
@@ -453,12 +515,22 @@ class StageEventTracker:
                 command=_summarize_tool_command(tool_name, args),
                 command_args={"tool_name": tool_name, **args},
                 workspace=workspace,
+                execution_mode="in_process",
                 duration_ms=duration_ms,
                 result=output,
                 output_summary=output,
                 missing_fields=missing_fields,
                 priority="high",
             )
+            tracker._completed_tool_runs.append(
+                {
+                    "status": status,
+                    "command": _summarize_tool_command(tool_name, args),
+                    "result_preview": output,
+                }
+            )
+            if len(tracker._completed_tool_runs) > 20:
+                tracker._completed_tool_runs = tracker._completed_tool_runs[-20:]
 
         current_runner.events.on("turn_start", _on_turn_start, source=self._handler_source)
         current_runner.events.on("turn_end", _on_turn_end, source=self._handler_source)
@@ -915,7 +987,20 @@ async def execute_stage(
             evaluator_config,
         )
 
-    await _finalize_stage_success(session, task, stage, agent, output, total_tokens, elapsed)
+    final_output = _resolve_stage_output_summary(
+        stage.stage_name,
+        output,
+        tracker.get_completed_tool_runs(),
+    )
+    await _finalize_stage_success(
+        session,
+        task,
+        stage,
+        agent,
+        final_output,
+        total_tokens,
+        elapsed,
+    )
     return output
 
 
@@ -1133,7 +1218,11 @@ async def execute_stage_sandboxed(
     system_prompt = SYSTEM_PROMPTS.get(stage.agent_role, SYSTEM_PROMPTS["orchestrator"])
     system_prompt += "\n\n你的工作目录是: /workspace\n所有文件操作请在此目录下进行。"
 
-    resolved_model = resolve_model_for_role(stage.agent_role, stage_model)
+    runtime_overrides = _build_runtime_overrides(agent, stage_model)
+    resolved_model = resolve_model_for_role(
+        stage.agent_role,
+        runtime_overrides["model"],
+    )
     allowed_tools = list(ROLE_TOOLS.get(stage.agent_role, set()))
 
     # Resolve skill directories for the role
@@ -1165,8 +1254,194 @@ async def execute_stage_sandboxed(
             "prompt": user_prompt,
         },
         workspace="/workspace",
+        execution_mode="sandbox",
         priority="high",
     )
+
+    turn_runs: dict[str, dict[str, Any]] = {}
+    tool_runs: dict[str, dict[str, Any]] = {}
+
+    async def _handle_sandbox_event(stream_event: dict[str, Any]) -> None:
+        event_type = str(stream_event.get("type") or "")
+        data = stream_event.get("data")
+        if not isinstance(data, dict):
+            data = {}
+
+        if event_type == "llm_turn_sent":
+            turn = int(data.get("turn", 0) or 0)
+            correlation_id = f"{chat_correlation}:turn:{turn}"
+            log_id = await pipeline.emit_create(
+                task_id=task_id,
+                stage_id=stage_id,
+                stage_name=stage.stage_name,
+                agent_role=stage.agent_role,
+                event_type="llm_turn_sent",
+                event_source="llm",
+                status="running",
+                correlation_id=correlation_id,
+                request_body={
+                    "turn": turn,
+                    "message_count": int(data.get("message_count", 0) or 0),
+                },
+                workspace="/workspace",
+                execution_mode="sandbox",
+                priority="high",
+            )
+            turn_runs[correlation_id] = {"log_id": log_id, "started": time.monotonic()}
+            return
+
+        if event_type == "llm_turn_received":
+            turn = int(data.get("turn", 0) or 0)
+            correlation_id = f"{chat_correlation}:turn:{turn}"
+            run_info = turn_runs.pop(correlation_id, None)
+            duration_ms = None
+            if run_info is not None:
+                duration_ms = round((time.monotonic() - run_info["started"]) * 1000, 2)
+                await pipeline.emit_update(
+                    log_id=run_info["log_id"],
+                    updates={"status": "success", "duration_ms": duration_ms},
+                    priority="high",
+                )
+            await pipeline.emit_create(
+                task_id=task_id,
+                stage_id=stage_id,
+                stage_name=stage.stage_name,
+                agent_role=stage.agent_role,
+                event_type="llm_turn_received",
+                event_source="llm",
+                status="success",
+                correlation_id=correlation_id,
+                response_body={
+                    "turn": turn,
+                    "has_tool_calls": bool(data.get("has_tool_calls", False)),
+                    "tool_call_count": int(data.get("tool_call_count", 0) or 0),
+                    "content": str(data.get("content", "")),
+                },
+                duration_ms=duration_ms,
+                workspace="/workspace",
+                execution_mode="sandbox",
+                priority="high",
+            )
+            return
+
+        if event_type == "tool_call_started":
+            tool_call_id = str(data.get("tool_call_id", "")).strip()
+            if not tool_call_id:
+                return
+            tool_name = str(data.get("tool_name", ""))
+            args = data.get("args") if isinstance(data.get("args"), dict) else {}
+            workspace = str(args.get("cwd") or "/workspace").strip() or "/workspace"
+            log_id = await pipeline.emit_create(
+                task_id=task_id,
+                stage_id=stage_id,
+                stage_name=stage.stage_name,
+                agent_role=stage.agent_role,
+                event_type="tool_call_executed",
+                event_source="tool",
+                status="running",
+                correlation_id=tool_call_id,
+                command=_summarize_tool_command(tool_name, args),
+                command_args={"tool_name": tool_name, **args},
+                workspace=workspace,
+                execution_mode="sandbox",
+                priority="high",
+            )
+            tool_runs[tool_call_id] = {
+                "log_id": log_id,
+                "started": time.monotonic(),
+                "summary": "",
+                "truncated": False,
+            }
+            return
+
+        if event_type == "tool_output":
+            tool_call_id = str(data.get("tool_call_id", "")).strip()
+            if not tool_call_id:
+                return
+            chunk = str(data.get("chunk", ""))
+            run_info = tool_runs.get(tool_call_id)
+            if run_info is None:
+                return
+            summary, truncated = _append_output_summary(run_info["summary"], chunk)
+            run_info["summary"] = summary
+            run_info["truncated"] = run_info["truncated"] or truncated
+            await _safe_broadcast(
+                TASK_LOG_STREAM_UPDATE,
+                {
+                    "task_id": task_id,
+                    "stage_id": stage_id,
+                    "stage_name": stage.stage_name,
+                    "log_id": run_info["log_id"],
+                    "tool_call_id": tool_call_id,
+                    "chunk": chunk,
+                    "finished": False,
+                },
+            )
+            return
+
+        if event_type == "tool_call_finished":
+            tool_call_id = str(data.get("tool_call_id", "")).strip()
+            if not tool_call_id:
+                return
+            args = data.get("args") if isinstance(data.get("args"), dict) else {}
+            workspace = str(args.get("cwd") or "/workspace").strip() or "/workspace"
+            tool_name = str(data.get("tool_name", ""))
+            result_text = str(data.get("result", ""))
+            raw_status = str(data.get("status", "")).strip().lower()
+            status = (
+                raw_status
+                if raw_status in {"success", "failed", "cancelled"}
+                else infer_tool_status(result_text)
+            )
+            run_info = tool_runs.pop(tool_call_id, None)
+            if run_info is None:
+                await pipeline.emit_create(
+                    task_id=task_id,
+                    stage_id=stage_id,
+                    stage_name=stage.stage_name,
+                    agent_role=stage.agent_role,
+                    event_type="tool_call_executed",
+                    event_source="tool",
+                    status=status,
+                    correlation_id=tool_call_id,
+                    command=_summarize_tool_command(tool_name, args),
+                    command_args={"tool_name": tool_name, **args},
+                    workspace=workspace,
+                    execution_mode="sandbox",
+                    result=result_text,
+                    output_summary=result_text,
+                    priority="high",
+                )
+                return
+
+            duration_ms = _float_or_none(data.get("duration_ms"))
+            if duration_ms is None:
+                duration_ms = round((time.monotonic() - run_info["started"]) * 1000, 2)
+            output_summary = run_info["summary"] or result_text
+            await pipeline.emit_update(
+                log_id=run_info["log_id"],
+                updates={
+                    "status": status,
+                    "duration_ms": duration_ms,
+                    "result": result_text,
+                    "output_summary": output_summary,
+                    "output_truncated": bool(run_info.get("truncated", False)),
+                },
+                priority="high",
+            )
+            await _safe_broadcast(
+                TASK_LOG_STREAM_UPDATE,
+                {
+                    "task_id": task_id,
+                    "stage_id": stage_id,
+                    "stage_name": stage.stage_name,
+                    "log_id": run_info["log_id"],
+                    "tool_call_id": tool_call_id,
+                    "chunk": "",
+                    "finished": True,
+                },
+            )
+            return
 
     # 6. Send to sandbox container
     sandbox_mgr = get_sandbox_manager()
@@ -1181,9 +1456,46 @@ async def execute_stage_sandboxed(
         skill_dirs=skill_dirs,
         workdir="/workspace",
         timeout=int(settings.WORKER_STAGE_TIMEOUT),
+        on_event=_handle_sandbox_event,
     )
 
     elapsed = time.monotonic() - start_time
+
+    trailing_status = "failed" if sandbox_result.error else "cancelled"
+    for correlation_id, run_info in list(turn_runs.items()):
+        await pipeline.emit_update(
+            log_id=run_info["log_id"],
+            updates={
+                "status": trailing_status,
+                "duration_ms": round((time.monotonic() - run_info["started"]) * 1000, 2),
+            },
+            priority="high",
+        )
+        turn_runs.pop(correlation_id, None)
+    for tool_call_id, run_info in list(tool_runs.items()):
+        await pipeline.emit_update(
+            log_id=run_info["log_id"],
+            updates={
+                "status": trailing_status,
+                "duration_ms": round((time.monotonic() - run_info["started"]) * 1000, 2),
+                "output_summary": run_info.get("summary") or "",
+                "output_truncated": bool(run_info.get("truncated", False)),
+            },
+            priority="high",
+        )
+        await _safe_broadcast(
+            TASK_LOG_STREAM_UPDATE,
+            {
+                "task_id": task_id,
+                "stage_id": stage_id,
+                "stage_name": stage.stage_name,
+                "log_id": run_info["log_id"],
+                "tool_call_id": tool_call_id,
+                "chunk": "",
+                "finished": True,
+            },
+        )
+        tool_runs.pop(tool_call_id, None)
 
     if sandbox_result.error:
         await pipeline.emit_create(
@@ -1197,6 +1509,7 @@ async def execute_stage_sandboxed(
             correlation_id=chat_correlation,
             response_body={"error": sandbox_result.error},
             workspace="/workspace",
+            execution_mode="sandbox",
             duration_ms=round(elapsed * 1000, 2),
             priority="high",
         )
@@ -1204,37 +1517,49 @@ async def execute_stage_sandboxed(
 
     output = sandbox_result.text_content
     total_tokens = sandbox_result.total_tokens
+    sandbox_tool_runs: list[dict[str, str]] = []
 
-    # Log tool calls from sandbox
-    for index, tc in enumerate(sandbox_result.tool_calls):
-        tool_name = str(tc.get("tool_name") or "")
-        args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-        workspace = str(args.get("cwd") or "/workspace").strip() or "/workspace"
-        result_preview = str(tc.get("result_preview") or "")
-        raw_status = str(tc.get("status") or "").strip().lower()
-        status = raw_status if raw_status in {"success", "failed", "cancelled"} else infer_tool_status(
-            result_preview,
-        )
-        correlation_id = str(tc.get("tool_call_id") or "").strip() or (
-            f"{chat_correlation}:tool:{index + 1}"
-        )
-        await pipeline.emit_create(
-            task_id=task_id,
-            stage_id=stage_id,
-            stage_name=stage.stage_name,
-            agent_role=stage.agent_role,
-            event_type="tool_call_executed",
-            event_source="tool",
-            status=status,
-            correlation_id=correlation_id,
-            command=_summarize_tool_command(tool_name, args),
-            command_args={"tool_name": tool_name, **args},
-            workspace=workspace,
-            duration_ms=_float_or_none(tc.get("duration_ms")),
-            result=result_preview,
-            output_summary=result_preview,
-            priority="high",
-        )
+    # Fallback for legacy sandbox endpoint: tool calls are only available at completion.
+    if not getattr(sandbox_result, "streamed", False):
+        for index, tc in enumerate(sandbox_result.tool_calls):
+            tool_name = str(tc.get("tool_name") or "")
+            args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+            workspace = str(args.get("cwd") or "/workspace").strip() or "/workspace"
+            result_preview = str(tc.get("result_preview") or "")
+            raw_status = str(tc.get("status") or "").strip().lower()
+            status = (
+                raw_status
+                if raw_status in {"success", "failed", "cancelled"}
+                else infer_tool_status(result_preview)
+            )
+            correlation_id = str(tc.get("tool_call_id") or "").strip() or (
+                f"{chat_correlation}:tool:{index + 1}"
+            )
+            await pipeline.emit_create(
+                task_id=task_id,
+                stage_id=stage_id,
+                stage_name=stage.stage_name,
+                agent_role=stage.agent_role,
+                event_type="tool_call_executed",
+                event_source="tool",
+                status=status,
+                correlation_id=correlation_id,
+                command=_summarize_tool_command(tool_name, args),
+                command_args={"tool_name": tool_name, **args},
+                workspace=workspace,
+                execution_mode="sandbox",
+                duration_ms=_float_or_none(tc.get("duration_ms")),
+                result=result_preview,
+                output_summary=result_preview,
+                priority="high",
+            )
+            sandbox_tool_runs.append(
+                {
+                    "status": status,
+                    "command": _summarize_tool_command(tool_name, args),
+                    "result_preview": result_preview,
+                }
+            )
 
     # Log success response
     await pipeline.emit_create(
@@ -1252,6 +1577,7 @@ async def execute_stage_sandboxed(
             "tool_calls_count": len(sandbox_result.tool_calls),
         },
         workspace="/workspace",
+        execution_mode="sandbox",
         duration_ms=round(elapsed * 1000, 2),
         priority="high",
     )
@@ -1261,7 +1587,11 @@ async def execute_stage_sandboxed(
     stage.completed_at = datetime.now(timezone.utc)
     stage.duration_seconds = round(elapsed, 2)
     stage.tokens_used = total_tokens
-    stage.output_summary = output
+    stage.output_summary = _resolve_stage_output_summary(
+        stage.stage_name,
+        output,
+        sandbox_tool_runs,
+    )
     await session.commit()
 
     # 8. Update task total tokens and cost

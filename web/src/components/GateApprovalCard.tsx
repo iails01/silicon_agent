@@ -26,6 +26,7 @@ const GateApprovalCard: React.FC<GateApprovalCardProps> = ({ gate, onApprove, on
 
   return (
     <Card
+      id={`gate-card-${gate.id}`}
       size="small"
       title={
         <Space>
