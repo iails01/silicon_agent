@@ -25,7 +25,7 @@ from app.integration.notifier import (
 from app.models.audit import CircuitBreakerModel
 from app.models.gate import HumanGateModel
 from app.models.task import TaskModel, TaskStageModel
-from app.websocket.events import CB_TRIGGERED, GATE_CREATED, TASK_STATUS_CHANGED
+from app.websocket.events import CB_TRIGGERED, GATE_CREATED, TASK_STAGE_UPDATE, TASK_STATUS_CHANGED
 from app.websocket.manager import ws_manager
 from app.services.task_log_pipeline import get_task_log_pipeline
 from app.worker.compressor import CompressionResult, compress_stage_output
