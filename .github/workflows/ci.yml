@@ -66,7 +66,7 @@ jobs:
           pip install .[dev]
 
       - name: Run tests with coverage
-        run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing
+        run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=60
 
   frontend-check:
     runs-on: ubuntu-latest
