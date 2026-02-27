@@ -15,6 +15,7 @@ TASK_LOG_STREAM_UPDATE = "task:log_stream_update"
 GATE_CREATED = "gate:created"
 GATE_APPROVED = "gate:approved"
 GATE_REJECTED = "gate:rejected"
+GATE_REVISED = "gate:revised"
 
 # Circuit breaker events
 CB_TRIGGERED = "circuit_breaker:triggered"

@@ -87,6 +87,28 @@ class Settings(BaseSettings):
     MEMORY_MAX_ENTRIES_PER_CATEGORY: int = 50
     MEMORY_MAX_CONTEXT_TOKENS: int = 2000
 
+    # Phase 1: Structured contracts & failure handling
+    STAGE_CONTRACTS_ENABLED: bool = True
+    FAILURE_AUTO_RETRY_CATEGORIES: str = "transient,tool_error"
+    GATE_DEFAULT_MAX_RETRIES: int = 2
+
+    # Phase 2: Adaptive orchestration
+    CONDITIONS_ENABLED: bool = True
+    EVALUATOR_DEFAULT_MIN_CONFIDENCE: float = 0.7
+    EVALUATOR_MAX_ITERATIONS: int = 3
+    DYNAMIC_GATE_ENABLED: bool = False
+    DYNAMIC_GATE_CONFIDENCE_THRESHOLD: float = 0.5
+    STAGE_DEFAULT_MAX_RETRIES: int = 3
+
+    # Phase 3: Intelligent orchestration
+    GRAPH_EXECUTION_ENABLED: bool = False
+    GRAPH_MAX_LOOP_ITERATIONS: int = 5
+    INTERACTIVE_PLANNING_ENABLED: bool = False
+    INTERACTIVE_PLANNING_TEMPLATES: str = "full_pipeline"
+    DYNAMIC_ROUTING_ENABLED: bool = False
+    DYNAMIC_ROUTING_MODEL: str = ""
+    TEMPLATE_VERSIONING_ENABLED: bool = False
+
     # Task log pipeline
     TASK_LOG_PIPELINE_QUEUE_SIZE: int = 4000
     TASK_LOG_PIPELINE_FLUSH_INTERVAL_SECONDS: float = 1.0

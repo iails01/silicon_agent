@@ -140,6 +140,10 @@ class StageContext:
     repo_context: Optional[str] = None  # injected repo context (tech stack + dir tree)
     # Smart retry: failure context from previous attempt (Ralph Loop V2 pattern)
     retry_context: Optional[Dict[str, str]] = None  # {"error": msg, "prior_output": text}
+    # Phase 1.4: Custom instruction from template stage definition
+    custom_instruction: Optional[str] = None
+    # Phase 1.3: Gate rejection feedback context
+    gate_rejection_context: Optional[Dict[str, str]] = None  # {"comment": ..., "retry": "2/3"}
 
 
 def build_user_prompt(ctx: StageContext) -> str:
@@ -185,6 +189,21 @@ def build_user_prompt(ctx: StageContext) -> str:
             parts.append(f"**上次部分输出:**\n{truncated}")
         parts.append("请分析失败原因，避免重复同样的错误，重新完成任务。")
 
+    # Inject gate rejection feedback if this is a retry after gate rejection
+    if ctx.gate_rejection_context:
+        comment = ctx.gate_rejection_context.get("comment", "")
+        retry_info = ctx.gate_rejection_context.get("retry", "")
+        parts.append("\n## ⚠ Gate审批被拒绝 — 请根据反馈修改")
+        if retry_info:
+            parts.append(f"**重试次数:** {retry_info}")
+        if comment:
+            parts.append(f"**审批者反馈:** {comment}")
+        parts.append("请仔细阅读审批反馈，针对性地修改产出，避免重复同样的问题。")
+
     parts.append(f"\n## 当前阶段: {ctx.stage_name}\n{stage_instruction}")
+
+    # Append custom instruction from template stage definition (Phase 1.4)
+    if ctx.custom_instruction:
+        parts.append(f"\n## 附加指令\n{ctx.custom_instruction}")
 
     return "\n".join(parts)

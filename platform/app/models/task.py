@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -30,6 +30,13 @@ class TaskModel(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     branch_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     pr_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # Phase 3.2: Interactive planning
+    plan: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Phase 3.3: Dynamic routing decision audit trail
+    routing_decisions: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Phase 3.4: Template version used for this task
+    template_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     template_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("task_templates.id"), nullable=True
@@ -65,5 +72,15 @@ class TaskStageModel(Base):
     self_fix_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Phase 1.1: Structured output extracted from raw text
+    output_structured: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Phase 1.2: Failure classification category
+    failure_category: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    # Phase 2.2: Self-assessment confidence score (0.0 - 1.0)
+    self_assessment_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Phase 2.5: Per-stage retry count
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Phase 3.1: Execution count for graph loops
+    execution_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     task: Mapped[TaskModel] = relationship(back_populates="stages")

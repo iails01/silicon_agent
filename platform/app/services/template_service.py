@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.template import TaskTemplateModel
 from app.schemas.template import (
     TemplateCreateRequest,
     TemplateListResponse,
     TemplateResponse,
     TemplateUpdateRequest,
+    TemplateVersionListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,9 +93,11 @@ class TemplateService:
         self.session = session
 
     async def list_templates(self) -> TemplateListResponse:
-        result = await self.session.execute(
-            select(TaskTemplateModel).order_by(TaskTemplateModel.created_at)
-        )
+        query = select(TaskTemplateModel).order_by(TaskTemplateModel.created_at)
+        # Phase 3.4: Only return active versions when versioning is enabled
+        if settings.TEMPLATE_VERSIONING_ENABLED:
+            query = query.where(TaskTemplateModel.is_active == True)  # noqa: E712
+        result = await self.session.execute(query)
         templates = result.scalars().all()
         items = []
         for t in templates:
@@ -127,6 +132,54 @@ class TemplateService:
             return None
         if template.is_builtin:
             return self._to_response(template)
+
+        # Phase 3.4: Create new version instead of modifying in place
+        if settings.TEMPLATE_VERSIONING_ENABLED:
+            new_version = TaskTemplateModel(
+                id=str(uuid.uuid4()),
+                name=template.name,
+                display_name=(
+                    request.display_name
+                    if request.display_name is not None
+                    else template.display_name
+                ),
+                description=(
+                    request.description
+                    if request.description is not None
+                    else template.description
+                ),
+                stages=(
+                    json.dumps(
+                        [s.model_dump() for s in request.stages], ensure_ascii=False
+                    )
+                    if request.stages is not None
+                    else template.stages
+                ),
+                gates=(
+                    json.dumps(
+                        [g.model_dump() for g in request.gates], ensure_ascii=False
+                    )
+                    if request.gates is not None
+                    else template.gates
+                ),
+                estimated_hours=(
+                    request.estimated_hours
+                    if request.estimated_hours is not None
+                    else template.estimated_hours
+                ),
+                is_builtin=False,
+                version=template.version + 1,
+                parent_id=template.id,
+                is_active=True,
+            )
+            # Deactivate old version
+            template.is_active = False
+            self.session.add(new_version)
+            await self.session.commit()
+            await self.session.refresh(new_version)
+            return self._to_response(new_version)
+
+        # Non-versioned: mutate in place (original behavior)
         if request.display_name is not None:
             template.display_name = request.display_name
         if request.description is not None:
@@ -154,6 +207,17 @@ class TemplateService:
         await self.session.delete(template)
         await self.session.commit()
         return True
+
+    async def list_versions(self, template_name: str) -> TemplateVersionListResponse:
+        """List all versions of a template by name, ordered by version descending."""
+        result = await self.session.execute(
+            select(TaskTemplateModel)
+            .where(TaskTemplateModel.name == template_name)
+            .order_by(TaskTemplateModel.version.desc())
+        )
+        templates = result.scalars().all()
+        items = [self._to_response(t) for t in templates]
+        return TemplateVersionListResponse(items=items, total=len(items))
 
     async def seed_builtin_templates(self) -> None:
         for tpl_data in BUILTIN_TEMPLATES:
@@ -185,6 +249,9 @@ class TemplateService:
             gates=json.loads(template.gates) if template.gates else [],
             estimated_hours=template.estimated_hours,
             is_builtin=template.is_builtin,
+            version=getattr(template, "version", 1) or 1,
+            parent_id=getattr(template, "parent_id", None),
+            is_active=getattr(template, "is_active", True),
             created_at=template.created_at,
             updated_at=template.updated_at,
         )

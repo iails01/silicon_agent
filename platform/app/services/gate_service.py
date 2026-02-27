@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.gate import HumanGateModel
-from app.schemas.gate import GateApproveRequest, GateDetailResponse, GateListResponse, GateRejectRequest
+from app.schemas.gate import GateApproveRequest, GateDetailResponse, GateListResponse, GateRejectRequest, GateReviseRequest
 
 
 class GateService:
@@ -74,6 +74,23 @@ class GateService:
         gate.status = "rejected"
         gate.reviewer = request.reviewer
         gate.review_comment = request.comment
+        gate.reviewed_at = datetime.now(timezone.utc)
+        await self.session.commit()
+        await self.session.refresh(gate)
+        return GateDetailResponse.model_validate(gate)
+
+    async def revise(self, gate_id: str, request: GateReviseRequest) -> Optional[GateDetailResponse]:
+        """Phase 2.4: Revise and continue — approve with modifications."""
+        result = await self.session.execute(
+            select(HumanGateModel).where(HumanGateModel.id == gate_id)
+        )
+        gate = result.scalar_one_or_none()
+        if gate is None:
+            return None
+        gate.status = "revised"
+        gate.reviewer = request.reviewer
+        gate.review_comment = request.comment
+        gate.revised_content = request.revised_content
         gate.reviewed_at = datetime.now(timezone.utc)
         await self.session.commit()
         await self.session.refresh(gate)

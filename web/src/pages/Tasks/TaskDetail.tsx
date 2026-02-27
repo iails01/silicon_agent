@@ -20,6 +20,7 @@ const STATUS_COLOR: Record<string, string> = {
   failed: 'error',
   cancelled: 'warning',
   skipped: 'default',
+  planning: 'warning',
 };
 
 const STAGE_DISPLAY: Record<string, string> = Object.fromEntries(
@@ -179,6 +180,54 @@ const TaskDetail: React.FC = () => {
                   </Space>
                 }
               >
+                {/* Top Section: High-level metadata (Badges, Retries, Failure Category) */}
+                <div style={{ marginBottom: 12 }}>
+                  <Space wrap>
+                    {/* Phase 1.1: Structured output badges */}
+                    {stage.output_structured && (
+                      <>
+                        <Tag color={stage.output_structured.status === 'pass' ? 'green' : stage.output_structured.status === 'fail' ? 'red' : 'orange'}>
+                          {stage.output_structured.status}
+                        </Tag>
+                        {stage.output_structured.confidence != null && (
+                          <Tag color={stage.output_structured.confidence >= 0.7 ? 'green' : stage.output_structured.confidence >= 0.5 ? 'orange' : 'red'}>
+                            信心: {Math.round(stage.output_structured.confidence * 100)}%
+                          </Tag>
+                        )}
+                        {/* Stage-specific badges */}
+                        {(stage.output_structured as Record<string, unknown>).tests_passed != null && (
+                          <Tag color="green">通过: {String((stage.output_structured as Record<string, unknown>).tests_passed)}</Tag>
+                        )}
+                        {(stage.output_structured as Record<string, unknown>).tests_failed != null && Number((stage.output_structured as Record<string, unknown>).tests_failed) > 0 && (
+                          <Tag color="red">失败: {String((stage.output_structured as Record<string, unknown>).tests_failed)}</Tag>
+                        )}
+                        {(stage.output_structured as Record<string, unknown>).issues_critical != null && Number((stage.output_structured as Record<string, unknown>).issues_critical) > 0 && (
+                          <Tag color="red">Critical: {String((stage.output_structured as Record<string, unknown>).issues_critical)}</Tag>
+                        )}
+                        {(stage.output_structured as Record<string, unknown>).issues_major != null && Number((stage.output_structured as Record<string, unknown>).issues_major) > 0 && (
+                          <Tag color="orange">Major: {String((stage.output_structured as Record<string, unknown>).issues_major)}</Tag>
+                        )}
+                        {stage.output_structured.artifacts && stage.output_structured.artifacts.length > 0 && (
+                          <Tag>{stage.output_structured.artifacts.length} 文件</Tag>
+                        )}
+                      </>
+                    )}
+                    {/* Phase 1.2: Failure category badge */}
+                    {stage.failure_category && (
+                      <Tag color="volcano">{stage.failure_category}</Tag>
+                    )}
+                    {/* Phase 2.5: Retry count */}
+                    {stage.retry_count > 0 && (
+                      <Tag>重试 {stage.retry_count}</Tag>
+                    )}
+                  </Space>
+                  {stage.output_structured?.summary && (
+                    <div style={{ marginTop: 4, color: '#666', fontSize: 13 }}>
+                      {stage.output_structured.summary}
+                    </div>
+                  )}
+                </div>
+
                 <Tabs
                   defaultActiveKey="react"
                   items={[
@@ -186,43 +235,57 @@ const TaskDetail: React.FC = () => {
                       key: 'react',
                       label: '推演过程 (ReAct Track)',
                       children: (
-                        <StageReActDetails
-                          taskId={task.id}
-                          stageId={stage.id}
-                          stageName={stage.stage_name}
-                          isRunning={stage.status === 'running'}
-                        />
+                        <div style={{ padding: '8px 0' }}>
+                          <StageReActDetails
+                            taskId={task.id}
+                            stageId={stage.id}
+                            stageName={stage.stage_name}
+                            isRunning={stage.status === 'running'}
+                          />
+                        </div>
                       ),
                     },
                     {
                       key: 'output',
-                      label: '阶段产出结果',
-                      children: stage.output_summary ? (
-                        <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', padding: 16 }}>
-                          {stage.output_summary}
-                        </Typography.Paragraph>
-                      ) : stage.error_message ? (
-                        <div style={{ padding: 16 }}>
-                          <Typography.Text type="danger">{stage.error_message}</Typography.Text>
-                          {task.status === 'failed' && (
-                            <div style={{ marginTop: 12 }}>
-                              <Button
-                                type="primary"
-                                size="small"
-                                icon={<ReloadOutlined />}
-                                onClick={async () => {
-                                  await retryTask.mutateAsync(task.id);
-                                  message.success('任务已重新提交，将从失败阶段继续执行');
-                                }}
-                                loading={retryTask.isPending}
-                              >
-                                从此阶段重试
-                              </Button>
+                      label: '产出详情 & 日志',
+                      children: (
+                        <div style={{ minHeight: 120 }}>
+                          {stage.output_summary ? (
+                            <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
+                              {stage.output_summary}
+                            </Typography.Paragraph>
+                          ) : stage.error_message ? (
+                            <div style={{ padding: 16 }}>
+                              <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
+                                {stage.error_message}
+                              </Typography.Text>
+                              {task.status === 'failed' && (
+                                <Button
+                                  type="primary"
+                                  size="small"
+                                  icon={<ReloadOutlined />}
+                                  onClick={async () => {
+                                    await retryTask.mutateAsync(task.id);
+                                    message.success('任务已重新提交，将从失败阶段继续执行');
+                                  }}
+                                  loading={retryTask.isPending}
+                                >
+                                  从此阶段重试
+                                </Button>
+                              )}
                             </div>
+                          ) : stage.status === 'running' ? (
+                            <div style={{ padding: 16 }}>
+                              <StageLiveLog stageId={stage.id} />
+                            </div>
+                          ) : stage.status === 'skipped' ? (
+                            <div style={{ padding: 32, color: '#999', fontStyle: 'italic', textAlign: 'center' }}>
+                              条件不满足，阶段已跳过
+                            </div>
+                          ) : (
+                            <Empty description="暂无产出摘要" style={{ margin: '32px 0' }} />
                           )}
                         </div>
-                      ) : (
-                        <Empty description="暂无产出摘要 (任务可能正在运行或未生成摘要)" style={{ marginTop: 32 }} />
                       ),
                     },
                   ]}

@@ -26,6 +26,8 @@ class CompressedOutput:
     l0: str  # one-line summary
     l1: str  # structured bullet points
     l2: str  # original full text
+    # Phase 1.1: Structured data from contracts (optional)
+    structured: Dict | None = None
 
 
 @dataclass
@@ -36,24 +38,42 @@ class CompressionResult:
     def add(self, co: CompressedOutput) -> None:
         self.outputs.append(co)
 
-    def build_prior_context(self, current_index: int) -> List[Dict[str, str]]:
+    def build_prior_context(
+        self,
+        current_index: int,
+        full_context_stages: set[str] | None = None,
+    ) -> List[Dict[str, str]]:
         """Build prior_outputs list with sliding-window compression.
 
         current_index: the 0-based index of the stage about to execute.
+        full_context_stages: stage names that should always get L2 (full text)
+            regardless of distance (Phase 1.5 cross-stage context recall).
         Returns list of {"stage": name, "output": text} using appropriate level.
         """
         result: List[Dict[str, str]] = []
         for i, co in enumerate(self.outputs):
-            distance = current_index - i - 1  # how far back this stage is
-            if distance <= 0:
-                # Immediately preceding stage → full text
+            # Phase 1.5: Override distance-based compression for specified stages
+            if full_context_stages and co.stage_name in full_context_stages:
                 text = co.l2
-            elif distance == 1:
-                # Next-nearest → L1 bullet points
-                text = f"[摘要]\n{co.l1}"
             else:
-                # Distant → L0 one-liner
-                text = f"[概要] {co.l0}"
+                distance = current_index - i - 1  # how far back this stage is
+                if distance <= 0:
+                    # Immediately preceding stage → full text
+                    text = co.l2
+                elif distance == 1:
+                    # Next-nearest → L1 bullet points
+                    # Phase 1.1: Use structured summary when available
+                    if co.structured and co.structured.get("summary"):
+                        text = f"[摘要]\n{co.l1}\n[结构化] {_format_structured(co.structured)}"
+                    else:
+                        text = f"[摘要]\n{co.l1}"
+                else:
+                    # Distant → L0 one-liner
+                    # Phase 1.1: Prefer structured summary over LLM-compressed L0
+                    if co.structured and co.structured.get("summary"):
+                        text = f"[概要] {co.structured['summary']} (状态: {co.structured.get('status', '?')}, 信心: {co.structured.get('confidence', '?')})"
+                    else:
+                        text = f"[概要] {co.l0}"
             result.append({"stage": co.stage_name, "output": text})
         return result
 
@@ -116,6 +136,21 @@ async def _llm_compress(stage_name: str, output: str) -> tuple[str, str]:
         # If JSON parsing fails, try to extract what we can
         logger.warning("Failed to parse LLM compression response, using fallback")
         return _fallback_l0(output), _fallback_l1(output)
+
+
+def _format_structured(structured: Dict) -> str:
+    """Format structured output contract data as a compact text summary."""
+    parts = []
+    for key, value in structured.items():
+        if key in ("summary", "status", "confidence", "metadata"):
+            continue  # Already shown or not useful inline
+        if isinstance(value, list) and value:
+            parts.append(f"{key}: {', '.join(str(v) for v in value[:5])}")
+        elif isinstance(value, (int, float)) and value:
+            parts.append(f"{key}: {value}")
+        elif isinstance(value, str) and value:
+            parts.append(f"{key}: {value}")
+    return "; ".join(parts) if parts else ""
 
 
 def _fallback_l0(output: str) -> str:

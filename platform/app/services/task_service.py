@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.models.task import TaskModel, TaskStageModel
 from app.models.template import TaskTemplateModel
 from app.schemas.task import (
@@ -280,17 +281,39 @@ class TaskService:
             if stage.status == "completed":
                 completed_tokens += stage.tokens_used or 0
             elif stage.status == "failed":
+                # Phase 2.5: Check per-stage retry limit
+                stage_max_retries = settings.STAGE_DEFAULT_MAX_RETRIES
+                if task.template and task.template.stages:
+                    try:
+                        import json as _json
+                        stage_defs = _json.loads(task.template.stages) if task.template.stages else []
+                        for sd in stage_defs:
+                            if sd.get("name") == stage.stage_name and sd.get("max_retries") is not None:
+                                stage_max_retries = sd["max_retries"]
+                                break
+                    except (ValueError, _json.JSONDecodeError):
+                        pass
+
+                if stage.retry_count >= stage_max_retries:
+                    logger.info(
+                        "Stage %s reached max retries (%d/%d), keeping failed",
+                        stage.stage_name, stage.retry_count, stage_max_retries,
+                    )
+                    continue
+
                 # Reset failed stage to pending so it can be re-executed
                 stage.status = "pending"
                 stage.error_message = None
+                stage.failure_category = None
                 stage.started_at = None
                 stage.completed_at = None
                 stage.duration_seconds = None
                 stage.tokens_used = 0
                 stage.output_summary = None
+                stage.output_structured = None
+                stage.retry_count += 1
             # pending stages stay as-is
 
-        from app.config import settings
         task.total_tokens = completed_tokens
         task.total_cost_rmb = completed_tokens * settings.CB_TOKEN_PRICE_PER_1K / 1000
 
