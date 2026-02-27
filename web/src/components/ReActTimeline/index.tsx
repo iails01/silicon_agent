@@ -68,7 +68,7 @@ function parseReActTurns(logs: TaskLogEvent[]): ReActTurn[] {
 const ExpandablePromptBlock: React.FC<{ content: string; title: string; maxHeight?: number }> = ({ content, title, maxHeight = 150 }) => {
     const [expanded, setExpanded] = useState(false);
     const [isOverflowing, setIsOverflowing] = useState(false);
-    const contentRef = useRef<HTMLPreElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (contentRef.current) {
@@ -100,7 +100,9 @@ const ExpandablePromptBlock: React.FC<{ content: string; title: string; maxHeigh
                         position: 'relative'
                     }}
                 >
-                    <pre ref={contentRef} className="message-pre">{content}</pre>
+                    <div ref={contentRef} className="markdown-body message-pre" style={{ whiteSpace: 'normal', fontSize: '13px' }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+                    </div>
                 </div>
             </div>
         </div>

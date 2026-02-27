@@ -6,10 +6,13 @@ import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOut
 import { useTask, useCancelTask, useRetryTask } from '@/hooks/useTasks';
 import { useStageLogStore } from '@/stores/stageLogStore';
 import { listTaskLogs } from '@/services/taskLogApi';
+import { useGateList } from '@/hooks/useGates';
 import PipelineView from '@/components/PipelineView';
 import ReActTimeline from '@/components/ReActTimeline';
 import { STAGE_NAMES } from '@/utils/constants';
 import { formatTimestamp, formatTokens, formatCost, formatDuration } from '@/utils/formatters';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 const { Title } = Typography;
 
@@ -112,6 +115,14 @@ const TaskDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: task, isLoading } = useTask(id!);
+  const { data: gates } = useGateList({ task_id: id });
+
+  const getLatestGate = (stageName: string) => {
+    if (!gates) return null;
+    const stageGates = gates.filter(g => g.content?.stage === stageName);
+    if (!stageGates.length) return null;
+    return stageGates.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+  };
   const cancelTask = useCancelTask();
   const retryTask = useRetryTask();
 
@@ -160,138 +171,194 @@ const TaskDetail: React.FC = () => {
       <Title level={4}>{task.title}</Title>
 
       <Card style={{ marginBottom: 16 }}>
-        <PipelineView stages={task.stages} />
+        <PipelineView stages={task.stages.map(stage => {
+          const isPendingGate = getLatestGate(stage.stage_name)?.status === 'pending';
+          return isPendingGate ? { ...stage, status: 'running' as any } : stage;
+        })} />
       </Card>
 
       {task.stages.length > 0 && (
         <Card title="阶段产出" style={{ marginBottom: 16 }}>
           <Collapse accordion>
-            {task.stages.map((stage) => (
-              <Collapse.Panel
-                key={stage.id}
-                header={
-                  <Space>
-                    <Tag color={STATUS_COLOR[stage.status]}>{stage.status}</Tag>
-                    <span>{STAGE_DISPLAY[stage.stage_name] || stage.stage_name}</span>
-                    <span style={{ color: '#999' }}>
-                      {stage.tokens_used > 0 && `${stage.tokens_used.toLocaleString()} tokens`}
-                      {stage.duration_seconds != null && ` · ${stage.duration_seconds.toFixed(1)}s`}
-                    </span>
-                  </Space>
-                }
-              >
-                {/* Top Section: High-level metadata (Badges, Retries, Failure Category) */}
-                <div style={{ marginBottom: 12 }}>
-                  <Space wrap>
-                    {/* Phase 1.1: Structured output badges */}
-                    {stage.output_structured && (
-                      <>
-                        <Tag color={stage.output_structured.status === 'pass' ? 'green' : stage.output_structured.status === 'fail' ? 'red' : 'orange'}>
-                          {stage.output_structured.status}
-                        </Tag>
-                        {stage.output_structured.confidence != null && (
-                          <Tag color={stage.output_structured.confidence >= 0.7 ? 'green' : stage.output_structured.confidence >= 0.5 ? 'orange' : 'red'}>
-                            信心: {Math.round(stage.output_structured.confidence * 100)}%
-                          </Tag>
-                        )}
-                        {/* Stage-specific badges */}
-                        {(stage.output_structured as Record<string, unknown>).tests_passed != null && (
-                          <Tag color="green">通过: {String((stage.output_structured as Record<string, unknown>).tests_passed)}</Tag>
-                        )}
-                        {(stage.output_structured as Record<string, unknown>).tests_failed != null && Number((stage.output_structured as Record<string, unknown>).tests_failed) > 0 && (
-                          <Tag color="red">失败: {String((stage.output_structured as Record<string, unknown>).tests_failed)}</Tag>
-                        )}
-                        {(stage.output_structured as Record<string, unknown>).issues_critical != null && Number((stage.output_structured as Record<string, unknown>).issues_critical) > 0 && (
-                          <Tag color="red">Critical: {String((stage.output_structured as Record<string, unknown>).issues_critical)}</Tag>
-                        )}
-                        {(stage.output_structured as Record<string, unknown>).issues_major != null && Number((stage.output_structured as Record<string, unknown>).issues_major) > 0 && (
-                          <Tag color="orange">Major: {String((stage.output_structured as Record<string, unknown>).issues_major)}</Tag>
-                        )}
-                        {stage.output_structured.artifacts && stage.output_structured.artifacts.length > 0 && (
-                          <Tag>{stage.output_structured.artifacts.length} 文件</Tag>
-                        )}
-                      </>
-                    )}
-                    {/* Phase 1.2: Failure category badge */}
-                    {stage.failure_category && (
-                      <Tag color="volcano">{stage.failure_category}</Tag>
-                    )}
-                    {/* Phase 2.5: Retry count */}
-                    {stage.retry_count > 0 && (
-                      <Tag>重试 {stage.retry_count}</Tag>
-                    )}
-                  </Space>
-                  {stage.output_structured?.summary && (
-                    <div style={{ marginTop: 4, color: '#666', fontSize: 13 }}>
-                      {stage.output_structured.summary}
-                    </div>
-                  )}
-                </div>
+            {task.stages.map((stage) => {
+              const latestGate = getLatestGate(stage.stage_name);
+              const isPendingGate = latestGate?.status === 'pending';
+              const displayStatus = isPendingGate ? 'running' : stage.status;
 
-                <Tabs
-                  defaultActiveKey="react"
-                  items={[
-                    {
-                      key: 'react',
-                      label: '推演过程 (ReAct Track)',
-                      children: (
-                        <div style={{ padding: '8px 0' }}>
-                          <StageReActDetails
-                            taskId={task.id}
-                            stageId={stage.id}
-                            stageName={stage.stage_name}
-                            isRunning={stage.status === 'running'}
-                          />
-                        </div>
-                      ),
-                    },
-                    {
-                      key: 'output',
-                      label: '产出详情 & 日志',
-                      children: (
-                        <div style={{ minHeight: 120 }}>
-                          {stage.output_summary ? (
-                            <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
-                              {stage.output_summary}
-                            </Typography.Paragraph>
-                          ) : stage.error_message ? (
-                            <div style={{ padding: 16 }}>
-                              <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
-                                {stage.error_message}
-                              </Typography.Text>
-                              {task.status === 'failed' && (
-                                <Button
-                                  type="primary"
-                                  size="small"
-                                  icon={<ReloadOutlined />}
-                                  onClick={async () => {
-                                    await retryTask.mutateAsync(task.id);
-                                    message.success('任务已重新提交，将从失败阶段继续执行');
-                                  }}
-                                  loading={retryTask.isPending}
-                                >
-                                  从此阶段重试
-                                </Button>
-                              )}
-                            </div>
-                          ) : stage.status === 'running' ? (
-                            <div style={{ padding: 16 }}>
-                              <StageLiveLog stageId={stage.id} />
-                            </div>
-                          ) : stage.status === 'skipped' ? (
-                            <div style={{ padding: 32, color: '#999', fontStyle: 'italic', textAlign: 'center' }}>
-                              条件不满足，阶段已跳过
-                            </div>
-                          ) : (
-                            <Empty description="暂无产出摘要" style={{ margin: '32px 0' }} />
+              return (
+                <Collapse.Panel
+                  key={stage.id}
+                  header={
+                    <Space>
+                      <Tag color={STATUS_COLOR[displayStatus]}>
+                        {isPendingGate ? 'waiting approval' : displayStatus}
+                      </Tag>
+                      <span>{STAGE_DISPLAY[stage.stage_name] || stage.stage_name}</span>
+                      <span style={{ color: '#999' }}>
+                        {stage.tokens_used > 0 && `${stage.tokens_used.toLocaleString()} tokens`}
+                        {stage.duration_seconds != null && ` · ${stage.duration_seconds.toFixed(1)}s`}
+                      </span>
+                      {(() => {
+                        const gate = getLatestGate(stage.stage_name);
+                        if (!gate) return null;
+
+                        let bgColor = '#fffbe6';
+                        let borderColor = '#ffe58f';
+                        let textColor = '#faad14';
+                        let label = '等待人工审批';
+                        let text = '该方案正等待人工介入确认。';
+                        let actionText = '处理审批';
+
+                        if (gate.status === 'approved') {
+                          bgColor = '#f6ffed';
+                          borderColor = '#b7eb8f';
+                          textColor = '#52c41a';
+                          label = '审批已通过';
+                          text = '方案已获人工审批确认。';
+                          actionText = '查看审批';
+                        } else if (gate.status === 'rejected') {
+                          bgColor = '#fff2f0';
+                          borderColor = '#ffccc7';
+                          textColor = '#f5222d';
+                          label = '审批被驳回';
+                          text = '方案已被驳回，正在重新设计。';
+                          actionText = '查看结果';
+                        } else if (gate.status === 'revised') {
+                          bgColor = '#e6f4ff';
+                          borderColor = '#91caff';
+                          textColor = '#1677ff';
+                          label = '方案已修订';
+                          text = '方案已由人工修订。';
+                          actionText = '查看内容';
+                        }
+
+                        return (
+                          <span
+                            style={{ marginLeft: 16, fontSize: 13, backgroundColor: bgColor, padding: '2px 8px', borderRadius: 4, border: `1px solid ${borderColor}` }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span style={{ color: textColor, fontWeight: 500, marginRight: 8 }}>{label}</span>
+                            <span style={{ color: '#666', marginRight: 8 }}>{text}</span>
+                            <a onClick={(e) => { e.preventDefault(); navigate(`/gates?status=all#gate-card-${gate.id}`); }}>{actionText} →</a>
+                          </span>
+                        );
+                      })()}
+                    </Space>
+                  }
+                >
+                  {/* Top Section: High-level metadata (Badges, Retries, Failure Category) */}
+                  <div style={{ marginBottom: 12 }}>
+                    <Space wrap>
+                      {/* Phase 1.1: Structured output badges */}
+                      {stage.output_structured && (
+                        <>
+                          <Tag color={stage.output_structured.status === 'pass' ? 'green' : stage.output_structured.status === 'fail' ? 'red' : 'orange'}>
+                            {stage.output_structured.status}
+                          </Tag>
+                          {stage.output_structured.confidence != null && (
+                            <Tag color={stage.output_structured.confidence >= 0.7 ? 'green' : stage.output_structured.confidence >= 0.5 ? 'orange' : 'red'}>
+                              信心: {Math.round(stage.output_structured.confidence * 100)}%
+                            </Tag>
                           )}
-                        </div>
-                      ),
-                    },
-                  ]}
-                />
-              </Collapse.Panel>
-            ))}
+                          {/* Stage-specific badges */}
+                          {(stage.output_structured as Record<string, unknown>).tests_passed != null && (
+                            <Tag color="green">通过: {String((stage.output_structured as Record<string, unknown>).tests_passed)}</Tag>
+                          )}
+                          {(stage.output_structured as Record<string, unknown>).tests_failed != null && Number((stage.output_structured as Record<string, unknown>).tests_failed) > 0 && (
+                            <Tag color="red">失败: {String((stage.output_structured as Record<string, unknown>).tests_failed)}</Tag>
+                          )}
+                          {(stage.output_structured as Record<string, unknown>).issues_critical != null && Number((stage.output_structured as Record<string, unknown>).issues_critical) > 0 && (
+                            <Tag color="red">Critical: {String((stage.output_structured as Record<string, unknown>).issues_critical)}</Tag>
+                          )}
+                          {(stage.output_structured as Record<string, unknown>).issues_major != null && Number((stage.output_structured as Record<string, unknown>).issues_major) > 0 && (
+                            <Tag color="orange">Major: {String((stage.output_structured as Record<string, unknown>).issues_major)}</Tag>
+                          )}
+                          {stage.output_structured.artifacts && stage.output_structured.artifacts.length > 0 && (
+                            <Tag>{stage.output_structured.artifacts.length} 文件</Tag>
+                          )}
+                        </>
+                      )}
+                      {/* Phase 1.2: Failure category badge */}
+                      {stage.failure_category && (
+                        <Tag color="volcano">{stage.failure_category}</Tag>
+                      )}
+                      {/* Phase 2.5: Retry count */}
+                      {stage.retry_count > 0 && (
+                        <Tag>重试 {stage.retry_count}</Tag>
+                      )}
+                    </Space>
+                    {stage.output_structured?.summary && (
+                      <div style={{ marginTop: 4, color: '#666', fontSize: 13 }}>
+                        {stage.output_structured.summary}
+                      </div>
+                    )}
+                  </div>
+
+                  <Tabs
+                    defaultActiveKey="react"
+                    items={[
+                      {
+                        key: 'react',
+                        label: '推演过程 (ReAct Track)',
+                        children: (
+                          <div style={{ padding: '8px 0' }}>
+                            <StageReActDetails
+                              taskId={task.id}
+                              stageId={stage.id}
+                              stageName={stage.stage_name}
+                              isRunning={stage.status === 'running'}
+                            />
+                          </div>
+                        ),
+                      },
+                      {
+                        key: 'output',
+                        label: '产出详情 & 日志',
+                        children: (
+                          <div style={{ minHeight: 120 }}>
+                            {stage.output_summary ? (
+                              <div className="markdown-body" style={{ padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{stage.output_summary}</ReactMarkdown>
+                              </div>
+                            ) : stage.error_message ? (
+                              <div style={{ padding: 16 }}>
+                                <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
+                                  {stage.error_message}
+                                </Typography.Text>
+                                {task.status === 'failed' && (
+                                  <Button
+                                    type="primary"
+                                    size="small"
+                                    icon={<ReloadOutlined />}
+                                    onClick={async () => {
+                                      await retryTask.mutateAsync(task.id);
+                                      message.success('任务已重新提交，将从失败阶段继续执行');
+                                    }}
+                                    loading={retryTask.isPending}
+                                  >
+                                    从此阶段重试
+                                  </Button>
+                                )}
+                              </div>
+                            ) : stage.status === 'running' ? (
+                              <div style={{ padding: 16 }}>
+                                <StageLiveLog stageId={stage.id} />
+                              </div>
+                            ) : stage.status === 'skipped' ? (
+                              <div style={{ padding: 32, color: '#999', fontStyle: 'italic', textAlign: 'center' }}>
+                                条件不满足，阶段已跳过
+                              </div>
+                            ) : (
+                              <Empty description="暂无产出摘要" style={{ margin: '32px 0' }} />
+                            )}
+                          </div>
+                        ),
+                      },
+                    ]}
+                  />
+                </Collapse.Panel>
+              );
+            })}
           </Collapse>
         </Card>
       )}
