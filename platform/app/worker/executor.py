@@ -826,12 +826,19 @@ async def execute_stage(
                     _consume_stream(),
                     timeout=settings.WORKER_STAGE_TIMEOUT,
                 )
+                if not final_text.strip():
+                    for msg in reversed(runner.get_history()):
+                        if msg.role in ("assistant", "tool") and msg.content:
+                            final_text = msg.content
+                            break
+                            
                 await tracker.emit_chat_received(
                     chat_correlation,
                     status="success",
                     response_body={"attempt": attempt + 1, "content": final_text},
                     duration_ms=round((time.monotonic() - llm_started) * 1000, 2),
                 )
+                response = type('Response', (object,), {'text_content': final_text})
                 break
             except asyncio.CancelledError as e:
                 last_error = e
