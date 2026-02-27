@@ -1,19 +1,17 @@
 import React, { useState, useRef } from 'react';
 import {
-  Button, Tag, message, Modal, Radio, Input, Table, Space, Popconfirm, Alert, Spin,
+  Button, Tag, message, Modal, Radio, Input, Table, Space, Popconfirm, Alert, Spin, Select,
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, RobotOutlined, FormOutlined, PlusCircleOutlined,
 } from '@ant-design/icons';
 import { ProTable } from '@ant-design/pro-components';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
-import {
-  ModalForm, ProFormText, ProFormTextArea, ProFormSelect,
-} from '@ant-design/pro-components';
 import { Link } from 'react-router-dom';
 import { listTasks, decomposePrd, batchCreateTasks, createTask } from '@/services/taskApi';
 import { useTemplateList } from '@/hooks/useTemplates';
 import { useProjectList } from '@/hooks/useProjects';
+
 import { formatTimestamp, formatCost } from '@/utils/formatters';
 import type { Task, DecomposedTask } from '@/types/task';
 import { STAGE_NAMES } from '@/utils/constants';
@@ -47,6 +45,7 @@ const TaskList: React.FC = () => {
   const { data: templateData } = useTemplateList();
   const { data: projectData } = useProjectList();
 
+
   // Wizard state
   const [wizardOpen, setWizardOpen] = useState(false);
   const [step, setStep] = useState(0);
@@ -54,13 +53,15 @@ const TaskList: React.FC = () => {
 
   // Single mode state
   const [singleForm, setSingleForm] = useState({
-    title: '', description: '', template_id: '', project_id: '',
+    title: '', description: '', template_id: '', project_id: '', target_branch: '', yunxiao_task_id: 'silicon_agent',
   });
 
   // PRD mode state
   const [prdText, setPrdText] = useState('');
   const [prdProjectId, setPrdProjectId] = useState<string>('');
   const [prdTemplateId, setPrdTemplateId] = useState<string>('');
+  const [prdTargetBranch, setPrdTargetBranch] = useState<string>('');
+  const [prdYunxiaoTaskId, setPrdYunxiaoTaskId] = useState<string>('silicon_agent');
   const [decomposedTasks, setDecomposedTasks] = useState<EditableTask[]>([]);
   const [decomposeSummary, setDecomposeSummary] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
@@ -69,10 +70,12 @@ const TaskList: React.FC = () => {
   const resetWizard = () => {
     setStep(0);
     setCreateMode('single');
-    setSingleForm({ title: '', description: '', template_id: '', project_id: '' });
+    setSingleForm({ title: '', description: '', template_id: '', project_id: '', target_branch: '', yunxiao_task_id: 'silicon_agent' });
     setPrdText('');
     setPrdProjectId('');
     setPrdTemplateId('');
+    setPrdTargetBranch('');
+    setPrdYunxiaoTaskId('silicon_agent');
     setDecomposedTasks([]);
     setDecomposeSummary('');
     setAnalyzing(false);
@@ -117,12 +120,8 @@ const TaskList: React.FC = () => {
 
   // Handle single task create
   const handleCreateSingle = async () => {
-    if (!singleForm.title.trim()) {
-      message.warning('Title is required');
-      return;
-    }
-    if (!singleForm.description.trim()) {
-      message.warning('Description is required');
+    if (!singleForm.target_branch.trim()) {
+      message.warning('Target Git Branch is required');
       return;
     }
     setCreating(true);
@@ -132,6 +131,8 @@ const TaskList: React.FC = () => {
         description: singleForm.description,
         template_id: singleForm.template_id || undefined,
         project_id: singleForm.project_id || undefined,
+        target_branch: singleForm.target_branch,
+        yunxiao_task_id: 'silicon_agent',
       });
       message.success('Task created');
       actionRef.current?.reload();
@@ -149,6 +150,10 @@ const TaskList: React.FC = () => {
       message.warning('No tasks to create');
       return;
     }
+    if (!prdTargetBranch.trim()) {
+      message.warning('Target Git Branch is required');
+      return;
+    }
     setCreating(true);
     try {
       const result = await batchCreateTasks({
@@ -157,6 +162,8 @@ const TaskList: React.FC = () => {
           description: t.description,
           template_id: prdTemplateId || undefined,
           project_id: prdProjectId || undefined,
+          target_branch: prdTargetBranch,
+          yunxiao_task_id: 'silicon_agent',
         })),
       });
       message.success(`${result.created} tasks created`);
@@ -210,6 +217,12 @@ const TaskList: React.FC = () => {
       search: false,
     },
     { title: 'Title', dataIndex: 'title', ellipsis: true },
+    {
+      title: 'Yunxiao ID',
+      dataIndex: 'yunxiao_task_id',
+      width: 120,
+      render: (_, record) => record.yunxiao_task_id ? <Tag color="blue">{record.yunxiao_task_id}</Tag> : '-',
+    },
     {
       title: 'Template',
       dataIndex: 'template_name',
@@ -373,11 +386,31 @@ const TaskList: React.FC = () => {
                 onChange={(e) => setSingleForm((p) => ({ ...p, project_id: e.target.value }))}
                 style={{ width: '100%', padding: '4px 8px', borderRadius: 6, border: '1px solid #d9d9d9' }}
               >
-                <option value="">Select a project</option>
+                <option value="">Select a project (Repo Context)</option>
                 {projectOptions.map((o) => (
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>Yunxiao / Branch *</label>
+              <Input.Group compact style={{ display: 'flex' }}>
+                <Input
+                  style={{ width: '40%', backgroundColor: '#f5f5f5' }}
+                  value="silicon_agent"
+                  readOnly
+                  disabled
+                />
+                <Input
+                  style={{ width: '60%' }}
+                  value={singleForm.target_branch}
+                  onChange={(e) => setSingleForm((p) => ({ ...p, target_branch: e.target.value }))}
+                  placeholder="Target Git Branch (Mandatory)"
+                />
+              </Input.Group>
+              <div style={{ marginTop: 4, fontSize: 12, color: '#888' }}>
+                Code will be pushed to the specified branch after successful signoff.
+              </div>
             </div>
           </div>
         );
@@ -397,7 +430,7 @@ const TaskList: React.FC = () => {
           </div>
           <Space style={{ width: '100%' }} direction="vertical" size="middle">
             <div>
-              <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>Project (provides repo context for better analysis)</label>
+              <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>Project</label>
               <select
                 value={prdProjectId}
                 onChange={(e) => setPrdProjectId(e.target.value)}
@@ -410,7 +443,7 @@ const TaskList: React.FC = () => {
               </select>
             </div>
             <div>
-              <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>Default Template (applied to all generated tasks)</label>
+              <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>Default Template</label>
               <select
                 value={prdTemplateId}
                 onChange={(e) => setPrdTemplateId(e.target.value)}
@@ -421,6 +454,23 @@ const TaskList: React.FC = () => {
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', fontWeight: 500, marginBottom: 4 }}>Yunxiao / Branch *</label>
+              <Input.Group compact style={{ display: 'flex' }}>
+                <Input
+                  style={{ width: '40%', backgroundColor: '#f5f5f5' }}
+                  value="silicon_agent"
+                  readOnly
+                  disabled
+                />
+                <Input
+                  style={{ width: '60%' }}
+                  value={prdTargetBranch}
+                  onChange={(e) => setPrdTargetBranch(e.target.value)}
+                  placeholder="Target Git Branch (Mandatory)"
+                />
+              </Input.Group>
             </div>
           </Space>
         </div>
@@ -467,19 +517,11 @@ const TaskList: React.FC = () => {
     const buttons: React.ReactNode[] = [];
 
     if (step > 0) {
-      buttons.push(
-        <Button key="back" onClick={() => setStep((s) => s - 1)}>
-          Back
-        </Button>
-      );
+      buttons.push(<Button key="back" onClick={() => setStep((s) => s - 1)}>Back</Button>);
     }
 
     if (step === 0) {
-      buttons.push(
-        <Button key="next" type="primary" onClick={() => setStep(1)}>
-          Next
-        </Button>
-      );
+      buttons.push(<Button key="next" type="primary" onClick={() => setStep(1)}>Next</Button>);
     }
 
     if (step === 1 && createMode === 'single') {
@@ -492,13 +534,7 @@ const TaskList: React.FC = () => {
 
     if (step === 1 && createMode === 'prd') {
       buttons.push(
-        <Button
-          key="analyze"
-          type="primary"
-          icon={<RobotOutlined />}
-          loading={analyzing}
-          onClick={handleDecompose}
-        >
+        <Button key="analyze" type="primary" icon={<RobotOutlined />} loading={analyzing} onClick={handleDecompose}>
           {analyzing ? 'AI Analyzing...' : 'Analyze PRD'}
         </Button>
       );
@@ -506,13 +542,7 @@ const TaskList: React.FC = () => {
 
     if (step === 2) {
       buttons.push(
-        <Button
-          key="batch"
-          type="primary"
-          loading={creating}
-          onClick={handleBatchCreate}
-          disabled={decomposedTasks.length === 0}
-        >
+        <Button key="batch" type="primary" loading={creating} onClick={handleBatchCreate} disabled={decomposedTasks.length === 0}>
           Create {decomposedTasks.length} Tasks
         </Button>
       );
@@ -521,7 +551,6 @@ const TaskList: React.FC = () => {
     return buttons;
   };
 
-  // Step titles
   const stepTitles = createMode === 'prd'
     ? ['Choose Mode', 'Input PRD', 'Preview & Edit']
     : ['Choose Mode', 'Task Details'];

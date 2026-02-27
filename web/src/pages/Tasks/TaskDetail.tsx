@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline, Tabs } from 'antd';
-import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined, DownOutlined, LeftOutlined } from '@ant-design/icons';
 import { useTask, useCancelTask, useRetryTask } from '@/hooks/useTasks';
 import { useStageLogStore } from '@/stores/stageLogStore';
 import { listTaskLogs } from '@/services/taskLogApi';
@@ -111,18 +111,88 @@ const StageReActDetails: React.FC<{ taskId: string; stageId: string; stageName: 
   return <ReActTimeline logs={historicalLogs} loading={isLoading} />;
 };
 
+const ExpandableReport: React.FC<{ content: string; maxHeight?: number }> = ({ content, maxHeight = 400 }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  const [isOverflowing, setIsOverflowing] = React.useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (contentRef.current) {
+      setIsOverflowing(contentRef.current.scrollHeight > maxHeight);
+    }
+  }, [content, maxHeight]);
+
+  return (
+    <div style={{ position: 'relative' }}>
+      {isOverflowing && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => setExpanded(!expanded)}
+            style={{ fontSize: 13, color: '#8c8c8c', padding: 0 }}
+            icon={expanded ? <DownOutlined /> : <LeftOutlined />}
+          >
+            {expanded ? 'Collapse' : 'Expand all'}
+          </Button>
+        </div>
+      )}
+      <div
+        className="markdown-body"
+        style={{
+          padding: 16,
+          backgroundColor: '#f9f9f9',
+          borderRadius: 8,
+          border: '1px solid #eee',
+          maxHeight: expanded ? 'none' : maxHeight,
+          overflow: 'hidden',
+          position: 'relative'
+        }}
+      >
+        <div ref={contentRef}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        </div>
+        {!expanded && isOverflowing && (
+          <div
+            style={{
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 40,
+              background: 'linear-gradient(transparent, #f9f9f9)',
+              pointerEvents: 'none',
+              borderRadius: '0 0 8px 8px'
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+};
+
 const TaskDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: task, isLoading } = useTask(id!);
   const { data: gates } = useGateList({ task_id: id });
 
-  const getLatestGate = (stageName: string) => {
-    if (!gates) return null;
-    const stageGates = gates.filter(g => g.content?.stage === stageName);
-    if (!stageGates.length) return null;
-    return stageGates.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+  const getGateForStage = (stage: any, index: number, allStages: any[]) => {
+    if (!gates || !gates.length) return null;
+
+    // Find all gates that were triggered by this specific stage
+    const candidateGates = gates.filter(gate => {
+      const gateTriggerStageName = gate.content?.stage;
+      if (!gateTriggerStageName) return false;
+      return stage.stage_name === gateTriggerStageName;
+    });
+
+    if (candidateGates.length === 0) return null;
+
+    // Return the latest gate for this stage
+    return candidateGates.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
   };
+
   const cancelTask = useCancelTask();
   const retryTask = useRetryTask();
 
@@ -171,8 +241,9 @@ const TaskDetail: React.FC = () => {
       <Title level={4}>{task.title}</Title>
 
       <Card style={{ marginBottom: 16 }}>
-        <PipelineView stages={task.stages.map(stage => {
-          const isPendingGate = getLatestGate(stage.stage_name)?.status === 'pending';
+        <PipelineView stages={task.stages.map((stage, idx) => {
+          const gate = getGateForStage(stage, idx, task.stages);
+          const isPendingGate = gate?.status === 'pending';
           return isPendingGate ? { ...stage, status: 'running' as any } : stage;
         })} />
       </Card>
@@ -180,8 +251,8 @@ const TaskDetail: React.FC = () => {
       {task.stages.length > 0 && (
         <Card title="阶段产出" style={{ marginBottom: 16 }}>
           <Collapse accordion>
-            {task.stages.map((stage) => {
-              const latestGate = getLatestGate(stage.stage_name);
+            {task.stages.map((stage, idx) => {
+              const latestGate = getGateForStage(stage, idx, task.stages);
               const isPendingGate = latestGate?.status === 'pending';
               const displayStatus = isPendingGate ? 'running' : stage.status;
 
@@ -199,37 +270,43 @@ const TaskDetail: React.FC = () => {
                         {stage.duration_seconds != null && ` · ${stage.duration_seconds.toFixed(1)}s`}
                       </span>
                       {(() => {
-                        const gate = getLatestGate(stage.stage_name);
+                        const gate = latestGate;
                         if (!gate) return null;
+
+                        // Only show gate UI if:
+                        // 1. The gate is currently pending (blocking execution).
+                        // 2. OR the gate is resolved AND the stage has started/finished.
+                        // This prevents showing stale/irrelevant gate results on pending stages after a task retry.
+                        if (gate.status !== 'pending' && stage.status === 'pending') return null;
 
                         let bgColor = '#fffbe6';
                         let borderColor = '#ffe58f';
                         let textColor = '#faad14';
-                        let label = '等待人工审批';
-                        let text = '该方案正等待人工介入确认。';
-                        let actionText = '处理审批';
+                        let label = gate.gate_type === 'plan_review' ? '等待方案审批' : '等待结果审批';
+                        let text = gate.gate_type === 'plan_review' ? '该方案正等待人工介入确认。' : '执行结果正等待人工介入确认。';
+                        let actionText: string | null = gate.status === 'pending' ? '去审批' : null;
 
                         if (gate.status === 'approved') {
                           bgColor = '#f6ffed';
                           borderColor = '#b7eb8f';
                           textColor = '#52c41a';
-                          label = '审批已通过';
-                          text = '方案已获人工审批确认。';
+                          label = gate.gate_type === 'plan_review' ? '方案已通过' : '结果已通过';
+                          text = gate.gate_type === 'plan_review' ? '方案已获人工审批确认。' : '执行结果已获人工审批确认。';
                           actionText = '查看审批';
                         } else if (gate.status === 'rejected') {
                           bgColor = '#fff2f0';
                           borderColor = '#ffccc7';
                           textColor = '#f5222d';
-                          label = '审批被驳回';
-                          text = '方案已被驳回，正在重新设计。';
-                          actionText = '查看结果';
+                          label = gate.gate_type === 'plan_review' ? '方案被驳回' : '结果被驳回';
+                          text = gate.gate_type === 'plan_review' ? '方案已被人工审批驳回。' : '执行结果已被人工审批驳回。';
+                          actionText = '查看审批';
                         } else if (gate.status === 'revised') {
                           bgColor = '#e6f4ff';
                           borderColor = '#91caff';
                           textColor = '#1677ff';
-                          label = '方案已修订';
-                          text = '方案已由人工修订。';
-                          actionText = '查看内容';
+                          label = gate.gate_type === 'plan_review' ? '方案已修订' : '结果已修订';
+                          text = gate.gate_type === 'plan_review' ? '方案已由人工手动修订。' : '执行结果已由人工手动修订。';
+                          actionText = '查看审批';
                         }
 
                         return (
@@ -238,8 +315,18 @@ const TaskDetail: React.FC = () => {
                             onClick={(e) => e.stopPropagation()}
                           >
                             <span style={{ color: textColor, fontWeight: 500, marginRight: 8 }}>{label}</span>
-                            <span style={{ color: '#666', marginRight: 8 }}>{text}</span>
-                            <a onClick={(e) => { e.preventDefault(); navigate(`/gates?status=all#gate-card-${gate.id}`); }}>{actionText} →</a>
+                            <span style={{ color: '#666' }}>{text}</span>
+                            {actionText && (
+                              <a
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  navigate(`/gates?status=all#gate-card-${gate.id}`);
+                                }}
+                                style={{ marginLeft: 8 }}
+                              >
+                                {actionText} →
+                              </a>
+                            )}
                           </span>
                         );
                       })()}
@@ -287,11 +374,7 @@ const TaskDetail: React.FC = () => {
                         <Tag>重试 {stage.retry_count}</Tag>
                       )}
                     </Space>
-                    {stage.output_structured?.summary && (
-                      <div style={{ marginTop: 4, color: '#666', fontSize: 13 }}>
-                        {stage.output_structured.summary}
-                      </div>
-                    )}
+
                   </div>
 
                   <Tabs
@@ -313,13 +396,11 @@ const TaskDetail: React.FC = () => {
                       },
                       {
                         key: 'output',
-                        label: '产出详情 & 日志',
+                        label: '执行报告',
                         children: (
-                          <div style={{ minHeight: 120 }}>
+                          <div style={{ overflow: 'auto' }}>
                             {stage.output_summary ? (
-                              <div className="markdown-body" style={{ padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{stage.output_summary}</ReactMarkdown>
-                              </div>
+                              <ExpandableReport content={stage.output_summary} />
                             ) : stage.error_message ? (
                               <div style={{ padding: 16 }}>
                                 <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
@@ -371,6 +452,11 @@ const TaskDetail: React.FC = () => {
           </Descriptions.Item>
           <Descriptions.Item label="Template">{task.template_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="Project">{task.project_name || '-'}</Descriptions.Item>
+          {task.target_branch && (
+            <Descriptions.Item label="Target Branch">
+              <Tag icon={<CodeOutlined />}>{task.target_branch}</Tag>
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label="Created At">{formatTimestamp(task.created_at)}</Descriptions.Item>
           <Descriptions.Item label="Completed At">{task.completed_at ? formatTimestamp(task.completed_at) : '-'}</Descriptions.Item>
           <Descriptions.Item label="Duration">{duration != null ? formatDuration(duration) : '-'}</Descriptions.Item>
