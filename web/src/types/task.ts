@@ -46,6 +46,14 @@ export interface Task {
   project_id: string | null;
   template_name: string | null;
   project_name: string | null;
+  target_branch: string | null;
+  yunxiao_task_id: string | null;
+}
+
+export interface YunxiaoTask {
+  id: string;
+  title: string;
+  status: string;
 }
 
 export interface TaskListResponse {
@@ -60,6 +68,8 @@ export interface TaskCreateRequest {
   description: string;
   template_id?: string;
   project_id?: string;
+  target_branch: string;
+  yunxiao_task_id?: string;
 }
 
 // --- PRD Decompose ---
@@ -89,6 +99,8 @@ export interface BatchTaskItem {
   description?: string;
   template_id?: string;
   project_id?: string;
+  target_branch: string;
+  yunxiao_task_id?: string;
 }
 
 export interface TaskBatchCreateRequest {

@@ -55,3 +55,4 @@ export async function batchCreateTasks(req: TaskBatchCreateRequest): Promise<Tas
   const { data } = await api.post<TaskBatchCreateResponse>('/tasks/batch', req);
   return data;
 }
+

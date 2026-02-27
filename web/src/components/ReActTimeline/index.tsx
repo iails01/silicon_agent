@@ -34,24 +34,59 @@ interface ReActViewProps {
     loading?: boolean;
 }
 
+function getLogContent(log?: TaskLogEvent): string {
+    if (!log || !log.response_body) return '';
+    const raw = (log.response_body as Record<string, unknown>).content;
+    if (typeof raw === 'string') return raw.trim();
+    if (Array.isArray(raw)) {
+        return raw
+            .map((item) => {
+                if (typeof item === 'string') return item;
+                if (item && typeof item === 'object') {
+                    const record = item as Record<string, unknown>;
+                    if (typeof record.text === 'string') return record.text;
+                    if (typeof record.content === 'string') return record.content;
+                }
+                return '';
+            })
+            .filter(Boolean)
+            .join('\n')
+            .trim();
+    }
+    return '';
+}
+
 function parseReActTurns(logs: TaskLogEvent[]): ReActTurn[] {
     const sorted = [...logs].sort((a, b) => a.event_seq - b.event_seq);
     const turnsMap = new Map<string, ReActTurn>();
     let currentTurnNumber = 1;
 
     for (const log of sorted) {
-        const key = log.correlation_id || log.id;
+        let key = log.correlation_id || log.id;
+
         if (!turnsMap.has(key)) {
             turnsMap.set(key, { id: key, turnNumber: currentTurnNumber++ });
         }
         const turn = turnsMap.get(key)!;
 
+        // ... existing assignments ...
         if (log.event_type === 'agent_runner_chat_sent') {
             turn.prompt = log;
         } else if (log.event_type === 'llm_turn_sent') {
             turn.thought_sent = log;
-        } else if (log.event_type === 'llm_turn_received' || log.event_type === 'agent_runner_chat_received') {
-            turn.thought = log;
+        } else if (log.event_type === 'llm_turn_received') {
+            // Keep the latest turn that actually has content, avoiding empty turns overriding rich content.
+            const incomingContent = getLogContent(log);
+            const existingContent = getLogContent(turn.thought);
+            if (incomingContent || !existingContent) {
+                turn.thought = log;
+            }
+        } else if (log.event_type === 'agent_runner_chat_received') {
+            // Fallback only: do not override a meaningful llm_turn_received thought.
+            const existingContent = getLogContent(turn.thought);
+            if (!existingContent) {
+                turn.thought = log;
+            }
         } else if (log.event_type === 'tool_call_executed') {
             if (log.status === 'running' && !turn.action) {
                 turn.action = log;
@@ -68,7 +103,7 @@ function parseReActTurns(logs: TaskLogEvent[]): ReActTurn[] {
 const ExpandablePromptBlock: React.FC<{ content: string; title: string; maxHeight?: number }> = ({ content, title, maxHeight = 150 }) => {
     const [expanded, setExpanded] = useState(false);
     const [isOverflowing, setIsOverflowing] = useState(false);
-    const contentRef = useRef<HTMLPreElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (contentRef.current) {
@@ -100,15 +135,21 @@ const ExpandablePromptBlock: React.FC<{ content: string; title: string; maxHeigh
                         position: 'relative'
                     }}
                 >
-                    <pre ref={contentRef} className="message-pre">{content}</pre>
+                    <div ref={contentRef} className="markdown-body message-pre" style={{ whiteSpace: 'normal', fontSize: '13px' }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+                    </div>
                 </div>
             </div>
         </div>
     );
 };
 
-const CursorStyleThoughtBlock: React.FC<{ thoughtText: string; durationMs?: number | null }> = ({ thoughtText, durationMs }) => {
-    const [expanded, setExpanded] = useState(false);
+const CursorStyleThoughtBlock: React.FC<{
+    thoughtText: string;
+    durationMs?: number | null;
+    defaultExpanded?: boolean;
+}> = ({ thoughtText, durationMs, defaultExpanded = false }) => {
+    const [expanded, setExpanded] = useState(defaultExpanded);
 
     // In some cases duration_ms might be tiny or null; default to <1s or omit
     const seconds = durationMs ? Math.round(durationMs / 1000) : null;
@@ -177,7 +218,7 @@ export const ReActTimeline: React.FC<ReActViewProps> = ({ logs, loading }) => {
                 const isLLMRunning = turn.thought_sent?.status === 'running' && !turn.thought;
                 const streamLogId = turn.thought_sent?.id;
 
-                let thoughtText = turn.thought?.response_body?.content as string || '';
+                let thoughtText = getLogContent(turn.thought);
                 if (isLLMRunning && streamLogId) {
                     const streamLines = linesByLog[streamLogId];
                     if (streamLines && streamLines.length > 0) {
@@ -228,6 +269,7 @@ export const ReActTimeline: React.FC<ReActViewProps> = ({ logs, loading }) => {
                                         <CursorStyleThoughtBlock
                                             thoughtText={thoughtText}
                                             durationMs={turn.thought?.duration_ms || turn.thought_sent?.duration_ms}
+                                            defaultExpanded={turn.thought?.event_type === 'llm_turn_received'}
                                         />
                                     )}
 

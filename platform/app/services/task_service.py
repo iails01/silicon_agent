@@ -84,6 +84,8 @@ class TaskService:
             status="pending",
             template_id=request.template_id,
             project_id=request.project_id,
+            target_branch=request.target_branch,
+            yunxiao_task_id=request.yunxiao_task_id,
         )
         self.session.add(task)
         await self.session.flush()
@@ -246,6 +248,8 @@ class TaskService:
                 description=item.description,
                 template_id=item.template_id,
                 project_id=item.project_id,
+                target_branch=item.target_branch,
+                yunxiao_task_id=item.yunxiao_task_id,
             )
             result = await self.create_task(task_req)
             created_tasks.append(result)
@@ -352,4 +356,6 @@ class TaskService:
             project_id=task.project_id,
             template_name=task.template.display_name if task.template else None,
             project_name=task.project.display_name if task.project else None,
+            target_branch=task.target_branch,
+            yunxiao_task_id=task.yunxiao_task_id,
         )

@@ -2,14 +2,17 @@ import React, { useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline, Tabs } from 'antd';
-import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined, DownOutlined, LeftOutlined } from '@ant-design/icons';
 import { useTask, useCancelTask, useRetryTask } from '@/hooks/useTasks';
 import { useStageLogStore } from '@/stores/stageLogStore';
 import { listTaskLogs } from '@/services/taskLogApi';
+import { useGateList } from '@/hooks/useGates';
 import PipelineView from '@/components/PipelineView';
 import ReActTimeline from '@/components/ReActTimeline';
 import { STAGE_NAMES } from '@/utils/constants';
 import { formatTimestamp, formatTokens, formatCost, formatDuration } from '@/utils/formatters';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 const { Title } = Typography;
 
@@ -108,10 +111,88 @@ const StageReActDetails: React.FC<{ taskId: string; stageId: string; stageName: 
   return <ReActTimeline logs={historicalLogs} loading={isLoading} />;
 };
 
+const ExpandableReport: React.FC<{ content: string; maxHeight?: number }> = ({ content, maxHeight = 400 }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  const [isOverflowing, setIsOverflowing] = React.useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (contentRef.current) {
+      setIsOverflowing(contentRef.current.scrollHeight > maxHeight);
+    }
+  }, [content, maxHeight]);
+
+  return (
+    <div style={{ position: 'relative' }}>
+      {isOverflowing && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <Button
+            type="link"
+            size="small"
+            onClick={() => setExpanded(!expanded)}
+            style={{ fontSize: 13, color: '#8c8c8c', padding: 0 }}
+            icon={expanded ? <DownOutlined /> : <LeftOutlined />}
+          >
+            {expanded ? 'Collapse' : 'Expand all'}
+          </Button>
+        </div>
+      )}
+      <div
+        className="markdown-body"
+        style={{
+          padding: 16,
+          backgroundColor: '#f9f9f9',
+          borderRadius: 8,
+          border: '1px solid #eee',
+          maxHeight: expanded ? 'none' : maxHeight,
+          overflow: 'hidden',
+          position: 'relative'
+        }}
+      >
+        <div ref={contentRef}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        </div>
+        {!expanded && isOverflowing && (
+          <div
+            style={{
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 40,
+              background: 'linear-gradient(transparent, #f9f9f9)',
+              pointerEvents: 'none',
+              borderRadius: '0 0 8px 8px'
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+};
+
 const TaskDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: task, isLoading } = useTask(id!);
+  const { data: gates } = useGateList({ task_id: id });
+
+  const getGateForStage = (stage: any, index: number, allStages: any[]) => {
+    if (!gates || !gates.length) return null;
+
+    // Find all gates that were triggered by this specific stage
+    const candidateGates = gates.filter(gate => {
+      const gateTriggerStageName = gate.content?.stage;
+      if (!gateTriggerStageName) return false;
+      return stage.stage_name === gateTriggerStageName;
+    });
+
+    if (candidateGates.length === 0) return null;
+
+    // Return the latest gate for this stage
+    return candidateGates.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+  };
+
   const cancelTask = useCancelTask();
   const retryTask = useRetryTask();
 
@@ -160,138 +241,205 @@ const TaskDetail: React.FC = () => {
       <Title level={4}>{task.title}</Title>
 
       <Card style={{ marginBottom: 16 }}>
-        <PipelineView stages={task.stages} />
+        <PipelineView stages={task.stages.map((stage, idx) => {
+          const gate = getGateForStage(stage, idx, task.stages);
+          const isPendingGate = gate?.status === 'pending';
+          return isPendingGate ? { ...stage, status: 'running' as any } : stage;
+        })} />
       </Card>
 
       {task.stages.length > 0 && (
         <Card title="阶段产出" style={{ marginBottom: 16 }}>
           <Collapse accordion>
-            {task.stages.map((stage) => (
-              <Collapse.Panel
-                key={stage.id}
-                header={
-                  <Space>
-                    <Tag color={STATUS_COLOR[stage.status]}>{stage.status}</Tag>
-                    <span>{STAGE_DISPLAY[stage.stage_name] || stage.stage_name}</span>
-                    <span style={{ color: '#999' }}>
-                      {stage.tokens_used > 0 && `${stage.tokens_used.toLocaleString()} tokens`}
-                      {stage.duration_seconds != null && ` · ${stage.duration_seconds.toFixed(1)}s`}
-                    </span>
-                  </Space>
-                }
-              >
-                {/* Top Section: High-level metadata (Badges, Retries, Failure Category) */}
-                <div style={{ marginBottom: 12 }}>
-                  <Space wrap>
-                    {/* Phase 1.1: Structured output badges */}
-                    {stage.output_structured && (
-                      <>
-                        <Tag color={stage.output_structured.status === 'pass' ? 'green' : stage.output_structured.status === 'fail' ? 'red' : 'orange'}>
-                          {stage.output_structured.status}
-                        </Tag>
-                        {stage.output_structured.confidence != null && (
-                          <Tag color={stage.output_structured.confidence >= 0.7 ? 'green' : stage.output_structured.confidence >= 0.5 ? 'orange' : 'red'}>
-                            信心: {Math.round(stage.output_structured.confidence * 100)}%
-                          </Tag>
-                        )}
-                        {/* Stage-specific badges */}
-                        {(stage.output_structured as Record<string, unknown>).tests_passed != null && (
-                          <Tag color="green">通过: {String((stage.output_structured as Record<string, unknown>).tests_passed)}</Tag>
-                        )}
-                        {(stage.output_structured as Record<string, unknown>).tests_failed != null && Number((stage.output_structured as Record<string, unknown>).tests_failed) > 0 && (
-                          <Tag color="red">失败: {String((stage.output_structured as Record<string, unknown>).tests_failed)}</Tag>
-                        )}
-                        {(stage.output_structured as Record<string, unknown>).issues_critical != null && Number((stage.output_structured as Record<string, unknown>).issues_critical) > 0 && (
-                          <Tag color="red">Critical: {String((stage.output_structured as Record<string, unknown>).issues_critical)}</Tag>
-                        )}
-                        {(stage.output_structured as Record<string, unknown>).issues_major != null && Number((stage.output_structured as Record<string, unknown>).issues_major) > 0 && (
-                          <Tag color="orange">Major: {String((stage.output_structured as Record<string, unknown>).issues_major)}</Tag>
-                        )}
-                        {stage.output_structured.artifacts && stage.output_structured.artifacts.length > 0 && (
-                          <Tag>{stage.output_structured.artifacts.length} 文件</Tag>
-                        )}
-                      </>
-                    )}
-                    {/* Phase 1.2: Failure category badge */}
-                    {stage.failure_category && (
-                      <Tag color="volcano">{stage.failure_category}</Tag>
-                    )}
-                    {/* Phase 2.5: Retry count */}
-                    {stage.retry_count > 0 && (
-                      <Tag>重试 {stage.retry_count}</Tag>
-                    )}
-                  </Space>
-                  {stage.output_structured?.summary && (
-                    <div style={{ marginTop: 4, color: '#666', fontSize: 13 }}>
-                      {stage.output_structured.summary}
-                    </div>
-                  )}
-                </div>
+            {task.stages.map((stage, idx) => {
+              const latestGate = getGateForStage(stage, idx, task.stages);
+              const isPendingGate = latestGate?.status === 'pending';
+              const displayStatus = isPendingGate ? 'running' : stage.status;
 
-                <Tabs
-                  defaultActiveKey="react"
-                  items={[
-                    {
-                      key: 'react',
-                      label: '推演过程 (ReAct Track)',
-                      children: (
-                        <div style={{ padding: '8px 0' }}>
-                          <StageReActDetails
-                            taskId={task.id}
-                            stageId={stage.id}
-                            stageName={stage.stage_name}
-                            isRunning={stage.status === 'running'}
-                          />
-                        </div>
-                      ),
-                    },
-                    {
-                      key: 'output',
-                      label: '产出详情 & 日志',
-                      children: (
-                        <div style={{ minHeight: 120 }}>
-                          {stage.output_summary ? (
-                            <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4 }}>
-                              {stage.output_summary}
-                            </Typography.Paragraph>
-                          ) : stage.error_message ? (
-                            <div style={{ padding: 16 }}>
-                              <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
-                                {stage.error_message}
-                              </Typography.Text>
-                              {task.status === 'failed' && (
-                                <Button
-                                  type="primary"
-                                  size="small"
-                                  icon={<ReloadOutlined />}
-                                  onClick={async () => {
-                                    await retryTask.mutateAsync(task.id);
-                                    message.success('任务已重新提交，将从失败阶段继续执行');
-                                  }}
-                                  loading={retryTask.isPending}
-                                >
-                                  从此阶段重试
-                                </Button>
-                              )}
-                            </div>
-                          ) : stage.status === 'running' ? (
-                            <div style={{ padding: 16 }}>
-                              <StageLiveLog stageId={stage.id} />
-                            </div>
-                          ) : stage.status === 'skipped' ? (
-                            <div style={{ padding: 32, color: '#999', fontStyle: 'italic', textAlign: 'center' }}>
-                              条件不满足，阶段已跳过
-                            </div>
-                          ) : (
-                            <Empty description="暂无产出摘要" style={{ margin: '32px 0' }} />
+              return (
+                <Collapse.Panel
+                  key={stage.id}
+                  header={
+                    <Space>
+                      <Tag color={STATUS_COLOR[displayStatus]}>
+                        {isPendingGate ? 'waiting approval' : displayStatus}
+                      </Tag>
+                      <span>{STAGE_DISPLAY[stage.stage_name] || stage.stage_name}</span>
+                      <span style={{ color: '#999' }}>
+                        {stage.tokens_used > 0 && `${stage.tokens_used.toLocaleString()} tokens`}
+                        {stage.duration_seconds != null && ` · ${stage.duration_seconds.toFixed(1)}s`}
+                      </span>
+                      {(() => {
+                        const gate = latestGate;
+                        if (!gate) return null;
+
+                        // Only show gate UI if:
+                        // 1. The gate is currently pending (blocking execution).
+                        // 2. OR the gate is resolved AND the stage has started/finished.
+                        // This prevents showing stale/irrelevant gate results on pending stages after a task retry.
+                        if (gate.status !== 'pending' && stage.status === 'pending') return null;
+
+                        let bgColor = '#fffbe6';
+                        let borderColor = '#ffe58f';
+                        let textColor = '#faad14';
+                        let label = gate.gate_type === 'plan_review' ? '等待方案审批' : '等待结果审批';
+                        let text = gate.gate_type === 'plan_review' ? '该方案正等待人工介入确认。' : '执行结果正等待人工介入确认。';
+                        let actionText: string | null = gate.status === 'pending' ? '去审批' : null;
+
+                        if (gate.status === 'approved') {
+                          bgColor = '#f6ffed';
+                          borderColor = '#b7eb8f';
+                          textColor = '#52c41a';
+                          label = gate.gate_type === 'plan_review' ? '方案已通过' : '结果已通过';
+                          text = gate.gate_type === 'plan_review' ? '方案已获人工审批确认。' : '执行结果已获人工审批确认。';
+                          actionText = '查看审批';
+                        } else if (gate.status === 'rejected') {
+                          bgColor = '#fff2f0';
+                          borderColor = '#ffccc7';
+                          textColor = '#f5222d';
+                          label = gate.gate_type === 'plan_review' ? '方案被驳回' : '结果被驳回';
+                          text = gate.gate_type === 'plan_review' ? '方案已被人工审批驳回。' : '执行结果已被人工审批驳回。';
+                          actionText = '查看审批';
+                        } else if (gate.status === 'revised') {
+                          bgColor = '#e6f4ff';
+                          borderColor = '#91caff';
+                          textColor = '#1677ff';
+                          label = gate.gate_type === 'plan_review' ? '方案已修订' : '结果已修订';
+                          text = gate.gate_type === 'plan_review' ? '方案已由人工手动修订。' : '执行结果已由人工手动修订。';
+                          actionText = '查看审批';
+                        }
+
+                        return (
+                          <span
+                            style={{ marginLeft: 16, fontSize: 13, backgroundColor: bgColor, padding: '2px 8px', borderRadius: 4, border: `1px solid ${borderColor}` }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span style={{ color: textColor, fontWeight: 500, marginRight: 8 }}>{label}</span>
+                            <span style={{ color: '#666' }}>{text}</span>
+                            {actionText && (
+                              <a
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  navigate(`/gates?status=all#gate-card-${gate.id}`);
+                                }}
+                                style={{ marginLeft: 8 }}
+                              >
+                                {actionText} →
+                              </a>
+                            )}
+                          </span>
+                        );
+                      })()}
+                    </Space>
+                  }
+                >
+                  {/* Top Section: High-level metadata (Badges, Retries, Failure Category) */}
+                  <div style={{ marginBottom: 12 }}>
+                    <Space wrap>
+                      {/* Phase 1.1: Structured output badges */}
+                      {stage.output_structured && (
+                        <>
+                          <Tag color={stage.output_structured.status === 'pass' ? 'green' : stage.output_structured.status === 'fail' ? 'red' : 'orange'}>
+                            {stage.output_structured.status}
+                          </Tag>
+                          {stage.output_structured.confidence != null && (
+                            <Tag color={stage.output_structured.confidence >= 0.7 ? 'green' : stage.output_structured.confidence >= 0.5 ? 'orange' : 'red'}>
+                              信心: {Math.round(stage.output_structured.confidence * 100)}%
+                            </Tag>
                           )}
-                        </div>
-                      ),
-                    },
-                  ]}
-                />
-              </Collapse.Panel>
-            ))}
+                          {/* Stage-specific badges */}
+                          {(stage.output_structured as Record<string, unknown>).tests_passed != null && (
+                            <Tag color="green">通过: {String((stage.output_structured as Record<string, unknown>).tests_passed)}</Tag>
+                          )}
+                          {(stage.output_structured as Record<string, unknown>).tests_failed != null && Number((stage.output_structured as Record<string, unknown>).tests_failed) > 0 && (
+                            <Tag color="red">失败: {String((stage.output_structured as Record<string, unknown>).tests_failed)}</Tag>
+                          )}
+                          {(stage.output_structured as Record<string, unknown>).issues_critical != null && Number((stage.output_structured as Record<string, unknown>).issues_critical) > 0 && (
+                            <Tag color="red">Critical: {String((stage.output_structured as Record<string, unknown>).issues_critical)}</Tag>
+                          )}
+                          {(stage.output_structured as Record<string, unknown>).issues_major != null && Number((stage.output_structured as Record<string, unknown>).issues_major) > 0 && (
+                            <Tag color="orange">Major: {String((stage.output_structured as Record<string, unknown>).issues_major)}</Tag>
+                          )}
+                          {stage.output_structured.artifacts && stage.output_structured.artifacts.length > 0 && (
+                            <Tag>{stage.output_structured.artifacts.length} 文件</Tag>
+                          )}
+                        </>
+                      )}
+                      {/* Phase 1.2: Failure category badge */}
+                      {stage.failure_category && (
+                        <Tag color="volcano">{stage.failure_category}</Tag>
+                      )}
+                      {/* Phase 2.5: Retry count */}
+                      {stage.retry_count > 0 && (
+                        <Tag>重试 {stage.retry_count}</Tag>
+                      )}
+                    </Space>
+
+                  </div>
+
+                  <Tabs
+                    defaultActiveKey="react"
+                    items={[
+                      {
+                        key: 'react',
+                        label: '推演过程 (ReAct Track)',
+                        children: (
+                          <div style={{ padding: '8px 0' }}>
+                            <StageReActDetails
+                              taskId={task.id}
+                              stageId={stage.id}
+                              stageName={stage.stage_name}
+                              isRunning={stage.status === 'running'}
+                            />
+                          </div>
+                        ),
+                      },
+                      {
+                        key: 'output',
+                        label: '执行报告',
+                        children: (
+                          <div style={{ overflow: 'auto' }}>
+                            {stage.output_summary ? (
+                              <ExpandableReport content={stage.output_summary} />
+                            ) : stage.error_message ? (
+                              <div style={{ padding: 16 }}>
+                                <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
+                                  {stage.error_message}
+                                </Typography.Text>
+                                {task.status === 'failed' && (
+                                  <Button
+                                    type="primary"
+                                    size="small"
+                                    icon={<ReloadOutlined />}
+                                    onClick={async () => {
+                                      await retryTask.mutateAsync(task.id);
+                                      message.success('任务已重新提交，将从失败阶段继续执行');
+                                    }}
+                                    loading={retryTask.isPending}
+                                  >
+                                    从此阶段重试
+                                  </Button>
+                                )}
+                              </div>
+                            ) : stage.status === 'running' ? (
+                              <div style={{ padding: 16 }}>
+                                <StageLiveLog stageId={stage.id} />
+                              </div>
+                            ) : stage.status === 'skipped' ? (
+                              <div style={{ padding: 32, color: '#999', fontStyle: 'italic', textAlign: 'center' }}>
+                                条件不满足，阶段已跳过
+                              </div>
+                            ) : (
+                              <Empty description="暂无产出摘要" style={{ margin: '32px 0' }} />
+                            )}
+                          </div>
+                        ),
+                      },
+                    ]}
+                  />
+                </Collapse.Panel>
+              );
+            })}
           </Collapse>
         </Card>
       )}
@@ -304,6 +452,11 @@ const TaskDetail: React.FC = () => {
           </Descriptions.Item>
           <Descriptions.Item label="Template">{task.template_name || '-'}</Descriptions.Item>
           <Descriptions.Item label="Project">{task.project_name || '-'}</Descriptions.Item>
+          {task.target_branch && (
+            <Descriptions.Item label="Target Branch">
+              <Tag icon={<CodeOutlined />}>{task.target_branch}</Tag>
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label="Created At">{formatTimestamp(task.created_at)}</Descriptions.Item>
           <Descriptions.Item label="Completed At">{task.completed_at ? formatTimestamp(task.completed_at) : '-'}</Descriptions.Item>
           <Descriptions.Item label="Duration">{duration != null ? formatDuration(duration) : '-'}</Descriptions.Item>
