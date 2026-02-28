@@ -209,11 +209,23 @@ class WorktreeManager:
 
         # Check if there are changes
         rc, out, _ = await _run("git status --porcelain", cwd=cwd)
+        rc, branch, _ = await _run("git branch --show-current", cwd=cwd)
+        if rc != 0 or not branch:
+            return None
+        push_branch = (target_branch or "").strip() or branch
+        if push_branch == branch:
+            push_cmd = f"git push -u origin {branch}"
+        else:
+            push_cmd = f"git push -u origin HEAD:{push_branch}"
+
         if not out.strip():
             logger.info("No changes to commit for task %s", task_id)
-            # Still return branch name for PR creation
-            rc, branch, _ = await _run("git branch --show-current", cwd=cwd)
-            return branch if rc == 0 else None
+            # Even without new commits, ensure target branch exists remotely.
+            rc, _, err = await _run_with_retry(push_cmd, cwd=cwd)
+            if rc != 0:
+                logger.error("git push failed for task %s after retries: %s", task_id, err)
+                return None
+            return push_branch
 
         # Stage all changes
         rc, _, err = await _run("git add -A", cwd=cwd)
@@ -231,15 +243,6 @@ class WorktreeManager:
             return None
 
         # Push to remote branch. If target_branch is set, push HEAD to it.
-        rc, branch, _ = await _run("git branch --show-current", cwd=cwd)
-        if rc != 0:
-            return None
-
-        push_branch = (target_branch or "").strip() or branch
-        if push_branch == branch:
-            push_cmd = f"git push -u origin {branch}"
-        else:
-            push_cmd = f"git push -u origin HEAD:{push_branch}"
 
         rc, _, err = await _run_with_retry(push_cmd, cwd=cwd)
         if rc != 0:

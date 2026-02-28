@@ -266,6 +266,54 @@ async def _pick_pending_task(session: AsyncSession) -> Optional[TaskModel]:
     return result.scalar_one_or_none()
 
 
+async def _has_git_worktree_changes(worktree_path: Optional[str]) -> Optional[bool]:
+    """Return whether worktree has uncommitted changes; None when check cannot be performed."""
+    if not worktree_path:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            "git status --porcelain",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=worktree_path,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+        return bool(stdout.decode().strip())
+    except Exception:
+        logger.warning("Failed to verify git changes for worktree %s", worktree_path, exc_info=True)
+        return None
+
+
+async def _ensure_code_stage_has_changes(
+    session: AsyncSession,
+    task: TaskModel,
+    stage: TaskStageModel,
+    worktree_path: Optional[str],
+) -> bool:
+    """Code stage must produce repository changes; otherwise fail fast."""
+    if (stage.stage_name or "").lower() != "code":
+        return True
+
+    changed = await _has_git_worktree_changes(worktree_path)
+    if changed:
+        return True
+
+    reason = (
+        "Code stage produced no repository file changes."
+        if changed is False
+        else "Code stage change verification failed (worktree unavailable or git status failed)."
+    )
+    logger.error("Task %s code stage has no detectable changes: %s", task.id, reason)
+    await mark_stage_failed(session, task, stage, reason)
+    from app.worker.agents import close_agents_for_task
+
+    close_agents_for_task(str(task.id))
+    await _fail_task(session, task, f"Stage {stage.stage_name} failed: {reason}")
+    return False
+
+
 async def _setup_worktree(task: TaskModel) -> tuple[Optional[str], Any]:
     """Create git worktree for the task if enabled. Returns (worktree_path, worktree_mgr)."""
     if not (settings.WORKTREE_ENABLED and task.project and task.project.repo_local_path):
@@ -291,20 +339,36 @@ async def _setup_worktree(task: TaskModel) -> tuple[Optional[str], Any]:
         )
         if worktree_path:
             logger.info("Task %s using worktree: %s", task.id, worktree_path)
-        duration_ms = round((time.monotonic() - worktree_started_at) * 1000, 2)
-        await _emit_system_log(
-            task,
-            event_type="worktree_create_finished",
-            status="success",
-            correlation_id=worktree_corr,
-            response_body={"worktree_path": worktree_path},
-            duration_ms=duration_ms,
-        )
-        await _close_started_system_log(
-            started_log_id=worktree_started_log_id,
-            started_at_monotonic=worktree_started_at,
-            status="success",
-        )
+            duration_ms = round((time.monotonic() - worktree_started_at) * 1000, 2)
+            await _emit_system_log(
+                task,
+                event_type="worktree_create_finished",
+                status="success",
+                correlation_id=worktree_corr,
+                response_body={"worktree_path": worktree_path},
+                duration_ms=duration_ms,
+            )
+            await _close_started_system_log(
+                started_log_id=worktree_started_log_id,
+                started_at_monotonic=worktree_started_at,
+                status="success",
+            )
+        else:
+            duration_ms = round((time.monotonic() - worktree_started_at) * 1000, 2)
+            await _emit_system_log(
+                task,
+                event_type="worktree_create_finished",
+                status="failed",
+                correlation_id=worktree_corr,
+                response_body={"error": "create_worktree_returned_none"},
+                duration_ms=duration_ms,
+            )
+            await _close_started_system_log(
+                started_log_id=worktree_started_log_id,
+                started_at_monotonic=worktree_started_at,
+                status="failed",
+                result="create_worktree_returned_none",
+            )
     except Exception:
         logger.warning(
             "Failed to create worktree for task %s, falling back to tmpdir",
@@ -522,8 +586,8 @@ async def _finalize_task_resources(
     worktree_path: Optional[str],
     sandbox_mgr: Any,
     sandbox_info: Any,
-) -> None:
-    """Post-completion: extract memories, commit/push worktree, and cleanup resources."""
+) -> bool:
+    """Post-completion: extract memories, commit/push worktree, cleanup resources."""
     # Extract memories from this task
     if settings.MEMORY_ENABLED and project_memory_store and prior_outputs:
         memory_corr = f"memory-extract-{uuid.uuid4().hex}"
@@ -585,6 +649,23 @@ async def _finalize_task_resources(
             )
 
     # Worktree: commit, push, and optionally create PR
+    worktree_expected = bool(
+        settings.WORKTREE_ENABLED and task.project and task.project.repo_local_path
+    )
+    if worktree_expected and not worktree_path:
+        await _emit_system_log(
+            task,
+            event_type="worktree_commit_push_finished",
+            status="failed",
+            response_body={"error": "worktree_path_missing"},
+        )
+        await _fail_task(
+            session,
+            task,
+            "Worktree unavailable: worktree_path missing, skip commit/push",
+        )
+        return False
+
     if worktree_mgr and worktree_path:
         worktree_commit_corr = f"worktree-commit-{uuid.uuid4().hex}"
         worktree_commit_started_at = time.monotonic()
@@ -601,6 +682,8 @@ async def _finalize_task_resources(
                 commit_message=f"feat: {task.title}\n\nTask-ID: {task.id}",
                 target_branch=task.target_branch,
             )
+            if not branch:
+                raise RuntimeError("worktree_commit_push_failed_or_no_branch")
             duration_ms = round((time.monotonic() - worktree_commit_started_at) * 1000, 2)
             await _emit_system_log(
                 task,
@@ -615,10 +698,9 @@ async def _finalize_task_resources(
                 started_at_monotonic=worktree_commit_started_at,
                 status="success",
             )
-            if branch:
-                task.branch_name = branch
-                await session.commit()
-            if branch and settings.WORKTREE_AUTO_PR:
+            task.branch_name = branch
+            await session.commit()
+            if settings.WORKTREE_AUTO_PR:
                 pr_corr = f"worktree-pr-{uuid.uuid4().hex}"
                 pr_started_at = time.monotonic()
                 pr_started_log_id = await _emit_system_log(
@@ -653,7 +735,7 @@ async def _finalize_task_resources(
                     started_at_monotonic=pr_started_at,
                     status="success",
                 )
-        except Exception:
+        except Exception as exc:
             logger.warning("Worktree commit/push failed for task %s", task.id, exc_info=True)
             duration_ms = round((time.monotonic() - worktree_commit_started_at) * 1000, 2)
             await _emit_system_log(
@@ -661,7 +743,7 @@ async def _finalize_task_resources(
                 event_type="worktree_commit_push_finished",
                 status="failed",
                 correlation_id=worktree_commit_corr,
-                response_body={"error": "worktree_commit_push_failed"},
+                response_body={"error": "worktree_commit_push_failed", "detail": str(exc)},
                 duration_ms=duration_ms,
             )
             await _close_started_system_log(
@@ -670,8 +752,11 @@ async def _finalize_task_resources(
                 status="failed",
                 result="worktree_commit_push_failed",
             )
+            await _fail_task(session, task, "Worktree commit/push failed")
+            return False
 
     await _cleanup_runtime_resources(task, worktree_mgr, worktree_path, sandbox_mgr, sandbox_info)
+    return True
 
 
 async def _cleanup_runtime_resources(
@@ -732,7 +817,6 @@ async def _cleanup_runtime_resources(
         except Exception:
             logger.warning("Sandbox cleanup failed for task %s", task.id, exc_info=True)
 
-
 async def _process_task(session: AsyncSession, task: TaskModel) -> None:
     """Orchestrate all stages of a task in order, with parallel execution support."""
     # Transition from claimed → running
@@ -788,7 +872,6 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                 project_memory_store = ProjectMemoryStore(str(task.project_id))
             except Exception:
                 logger.warning("Failed to init memory store for project %s", task.project_id, exc_info=True)
-
         # Phase 3.1: Graph-based execution when enabled
         if settings.GRAPH_EXECUTION_ENABLED and task.template:
             await _process_task_graph(
@@ -796,11 +879,14 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                 prior_outputs, compression, structured_outputs,
                 project_memory_store, repo_context, worktree_path, sandbox_info, sandbox_required_error,
             )
-            # Finalize and return
-            await _finalize_task_resources(
+            finalized = await _finalize_task_resources(
                 session, task, prior_outputs, project_memory_store,
                 worktree_mgr, worktree_path, sandbox_mgr, sandbox_info,
             )
+            if not finalized:
+                from app.worker.agents import close_agents_for_task
+                close_agents_for_task(str(task.id))
+                return
             resources_finalized = True
             from app.worker.agents import close_agents_for_task
             close_agents_for_task(str(task.id))
@@ -820,6 +906,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                         "Skipping completed stage %s for task %s (resuming)",
                         stage.stage_name, task.id,
                     )
+                    if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                        return
                     prior_outputs.append({
                         "stage": stage.stage_name,
                         "output": stage.output_summary or "",
@@ -829,6 +917,10 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                         compression.add(compressed)
                     else:
                         logger.warning("Compression failed for resumed stage %s", stage.stage_name)
+                    # Resume path should still enforce circuit breaker on accumulated totals.
+                    if await _check_circuit_breaker(session, task, stage):
+                        return
+
                 # Check gates for resumed stages
                 for stage in group:
                     gate_def = gates.get(stage.stage_name)
@@ -878,6 +970,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                 )
                 if result is None:
                     return  # stage failed or circuit breaker
+                if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                    return
                 prior_outputs.append({"stage": stage.stage_name, "output": result})
                 compressed = await _compress_with_log(task, stage, result)
                 if compressed is not None:
@@ -965,6 +1059,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
 
                     if result is None:
                         return
+                    if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                        return
                     prior_outputs.append({"stage": stage_name, "output": result})
                     compressed = await _compress_with_log(task, stage, result)
                     if compressed is not None:
@@ -996,10 +1092,14 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
             stage_index_base += len(group)
 
         # Finalize: extract memories, commit worktree, cleanup resources
-        await _finalize_task_resources(
+        finalized = await _finalize_task_resources(
             session, task, prior_outputs, project_memory_store,
             worktree_mgr, worktree_path, sandbox_mgr, sandbox_info,
         )
+        if not finalized:
+            from app.worker.agents import close_agents_for_task
+            close_agents_for_task(str(task.id))
+            return
         resources_finalized = True
 
         # Clean up per-task agents and mark completed
@@ -1063,6 +1163,8 @@ async def _process_task_graph(
 
     for stage in sorted_stages:
         if stage.status == "completed":
+            if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                return
             completed.add(stage.stage_name)
             prior_outputs.append({
                 "stage": stage.stage_name,
@@ -1070,6 +1172,9 @@ async def _process_task_graph(
             })
             if stage.output_structured:
                 structured_outputs[stage.stage_name] = stage.output_structured
+            # Resume path should still enforce circuit breaker on accumulated totals.
+            if await _check_circuit_breaker(session, task, stage):
+                return
                 
             # Phase 2: Missing check! Resume outstanding gates for completed stages in graph!
             gate_def = gates.get(stage.stage_name)
@@ -1163,6 +1268,8 @@ async def _process_task_graph(
                     return
                 continue
 
+            if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                return
             completed.add(node.name)
             prior_outputs.append({"stage": node.name, "output": result})
             compressed = await _compress_with_log(task, stage, result)
@@ -1221,6 +1328,8 @@ async def _process_task_graph(
                     failed.add(name)
                     continue
 
+                if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                    return
                 completed.add(name)
                 prior_outputs.append({"stage": name, "output": result})
                 compressed = await _compress_with_log(task, stage, result)
@@ -1943,8 +2052,8 @@ async def _handle_gate(
         correlation_id=gate_corr,
         response_body={"gate_type": gate_type},
     )
-    # Check if a pending gate already exists for this task and stage
-    result = await session.execute(
+    # 1) Reuse existing pending gate for this task/stage first.
+    pending_result = await session.execute(
         select(HumanGateModel)
         .where(
             HumanGateModel.task_id == task.id,
@@ -1953,7 +2062,7 @@ async def _handle_gate(
         )
     )
     existing_gate = None
-    for row in result.scalars().all():
+    for row in pending_result.scalars().all():
         if row.content and row.content.get("stage") == stage.stage_name:
             existing_gate = row
             break
@@ -1965,6 +2074,61 @@ async def _handle_gate(
             stage.stage_name, gate.id,
         )
     else:
+        # 2) Idempotency: if this stage has already been approved after the latest
+        # completion, do not create a duplicate pending gate during resume/recovery.
+        latest_result = await session.execute(
+            select(HumanGateModel)
+            .where(
+                HumanGateModel.task_id == task.id,
+                HumanGateModel.gate_type == gate_type,
+            )
+            .order_by(HumanGateModel.created_at.desc())
+        )
+        latest_gate_for_stage = None
+        for row in latest_result.scalars().all():
+            if row.content and row.content.get("stage") == stage.stage_name:
+                latest_gate_for_stage = row
+                break
+
+        if (
+            latest_gate_for_stage is not None
+            and latest_gate_for_stage.status == "approved"
+            and (
+                stage.completed_at is None
+                or latest_gate_for_stage.reviewed_at is None
+                or latest_gate_for_stage.reviewed_at >= stage.completed_at
+            )
+        ):
+            duration_ms = round((time.monotonic() - gate_started_at) * 1000, 2)
+            await _emit_system_log(
+                task,
+                stage=stage,
+                event_type="gate_wait_approved",
+                status="success",
+                correlation_id=gate_corr,
+                duration_ms=duration_ms,
+                response_body={
+                    "gate_id": latest_gate_for_stage.id,
+                    "already_approved": True,
+                },
+            )
+            await _close_started_system_log(
+                started_log_id=gate_started_log_id,
+                started_at_monotonic=gate_started_at,
+                status="success",
+                result="gate_already_approved",
+            )
+            logger.info(
+                "Reuse approved gate for stage %s (gate_id=%s)",
+                stage.stage_name,
+                latest_gate_for_stage.id,
+            )
+            return {
+                "result": "approved",
+                "comment": latest_gate_for_stage.review_comment or "",
+                "retry_count": current_retry,
+            }
+
         gate = HumanGateModel(
             gate_type=gate_type,
             task_id=task.id,

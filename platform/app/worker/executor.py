@@ -139,6 +139,11 @@ def _is_signoff_stage(stage_name: str) -> bool:
     return lowered == "signoff" or "signoff" in lowered or "签收" in (stage_name or "")
 
 
+def _output_summary_limit(stage_name: str) -> int:
+    # Use a unified summary cap across all stages to avoid stage-specific truncation.
+    return 200_000
+
+
 def _format_tool_digest(tool_items: list[dict[str, str]], limit: int = 6) -> str:
     if not tool_items:
         return ""
@@ -171,7 +176,7 @@ def _resolve_stage_output_summary(
             else:
                 resolved = f"## Signoff Summary\n{digest}"
 
-    return _clip_text(resolved, 50_000)
+    return _clip_text(resolved, _output_summary_limit(stage_name))
 
 
 # ---------------------------------------------------------------------------
