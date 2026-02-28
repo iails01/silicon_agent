@@ -111,3 +111,47 @@ export interface TaskBatchCreateResponse {
   created: number;
   tasks: Task[];
 }
+
+/**
+ * Request payload for retrying a task from a specific failed stage.
+ */
+export interface TaskRetryFromStageRequest {
+  /** Target failed stage identifier belonging to the task. */
+  stage_id: string;
+}
+
+/**
+ * Request payload for batch retrying failed tasks.
+ */
+export interface TaskBatchRetryRequest {
+  /** Task identifiers to retry in batch. */
+  task_ids: string[];
+}
+
+/**
+ * Per-task execution result returned by batch retry API.
+ */
+export interface TaskBatchRetryItem {
+  /** Task identifier for this retry item. */
+  task_id: string;
+  /** Whether retry was accepted for this task. */
+  success: boolean;
+  /** Failure reason when retry is rejected. */
+  reason?: string | null;
+  /** Latest task snapshot when backend includes it. */
+  task?: Task | null;
+}
+
+/**
+ * Batch retry summary returned by backend.
+ */
+export interface TaskBatchRetryResponse {
+  /** Number of tasks requested for retry. */
+  total: number;
+  /** Number of tasks successfully retried. */
+  succeeded: number;
+  /** Number of tasks failed to retry. */
+  failed: number;
+  /** Per-task retry result details. */
+  items: TaskBatchRetryItem[];
+}

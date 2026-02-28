@@ -414,3 +414,163 @@ async def test_batch_create(client):
             if task:
                 await session.delete(task)
         await session.commit()
+
+
+@pytest_asyncio.fixture
+async def seed_retry_enhanced_tasks():
+    """Seed tasks/stages for retry-from-stage and retry-batch tests."""
+    stages = json.dumps([
+        {"name": "parse", "agent_role": "orchestrator"},
+        {"name": "coding", "agent_role": "coding", "max_retries": 2},
+        {"name": "test", "agent_role": "test"},
+    ])
+    async with async_session_factory() as session:
+        tmpl = TaskTemplateModel(
+            id="tt-retry-enhanced-tmpl",
+            name="tt_retry_enhanced_tmpl",
+            display_name="TT Retry Enhanced Template",
+            description="Retry enhanced template",
+            stages=stages,
+            gates="[]",
+        )
+        session.add(tmpl)
+
+        failed_task = TaskModel(
+            id="tt-retry-enhanced-failed",
+            title="Retry Enhanced Failed",
+            status="failed",
+            template_id="tt-retry-enhanced-tmpl",
+        )
+        running_task = TaskModel(
+            id="tt-retry-enhanced-running",
+            title="Retry Enhanced Running",
+            status="running",
+            template_id="tt-retry-enhanced-tmpl",
+        )
+        session.add(failed_task)
+        session.add(running_task)
+
+        session.add_all(
+            [
+                TaskStageModel(
+                    id="tt-retry-enhanced-stage-parse",
+                    task_id="tt-retry-enhanced-failed",
+                    stage_name="parse",
+                    agent_role="orchestrator",
+                    status="completed",
+                    tokens_used=30,
+                ),
+                TaskStageModel(
+                    id="tt-retry-enhanced-stage-coding",
+                    task_id="tt-retry-enhanced-failed",
+                    stage_name="coding",
+                    agent_role="coding",
+                    status="failed",
+                    retry_count=1,
+                    error_message="build failed",
+                    output_summary="failed output",
+                    tokens_used=50,
+                ),
+                TaskStageModel(
+                    id="tt-retry-enhanced-stage-test",
+                    task_id="tt-retry-enhanced-failed",
+                    stage_name="test",
+                    agent_role="test",
+                    status="failed",
+                    retry_count=0,
+                    error_message="test failed",
+                    output_summary="test failed output",
+                ),
+            ]
+        )
+        await session.commit()
+
+    yield
+
+    async with async_session_factory() as session:
+        for stage_id in [
+            "tt-retry-enhanced-stage-parse",
+            "tt-retry-enhanced-stage-coding",
+            "tt-retry-enhanced-stage-test",
+        ]:
+            stage = await session.get(TaskStageModel, stage_id)
+            if stage:
+                await session.delete(stage)
+
+        for task_id in ["tt-retry-enhanced-failed", "tt-retry-enhanced-running"]:
+            task = await session.get(TaskModel, task_id)
+            if task:
+                await session.delete(task)
+
+        tmpl = await session.get(TaskTemplateModel, "tt-retry-enhanced-tmpl")
+        if tmpl:
+            await session.delete(tmpl)
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_retry_from_stage_success(client, seed_retry_enhanced_tasks):
+    """Retrying from a failed stage resets that stage and task status."""
+    resp = await client.post(
+        "/api/v1/tasks/tt-retry-enhanced-failed/retry-from-stage",
+        json={"stage_id": "tt-retry-enhanced-stage-coding"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "pending"
+
+    coding = next(s for s in data["stages"] if s["id"] == "tt-retry-enhanced-stage-coding")
+    assert coding["status"] == "pending"
+    assert coding["retry_count"] == 2
+    assert coding["error_message"] is None
+    assert coding["output_summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_retry_from_stage_rejects_non_failed_stage(client, seed_retry_enhanced_tasks):
+    """retry-from-stage returns 400 when target stage is not failed."""
+    resp = await client.post(
+        "/api/v1/tasks/tt-retry-enhanced-failed/retry-from-stage",
+        json={"stage_id": "tt-retry-enhanced-stage-parse"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_retry_from_stage_stage_not_found(client, seed_retry_enhanced_tasks):
+    """retry-from-stage returns 404 when stage id does not belong to task."""
+    resp = await client.post(
+        "/api/v1/tasks/tt-retry-enhanced-failed/retry-from-stage",
+        json={"stage_id": "missing-stage"},
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_retry_batch_mixed_results(client, seed_retry_enhanced_tasks):
+    """Batch retry reports mixed outcomes and only resets one failed stage."""
+    resp = await client.post(
+        "/api/v1/tasks/retry-batch",
+        json={
+            "task_ids": [
+                "tt-retry-enhanced-failed",
+                "tt-retry-enhanced-running",
+                "tt-retry-enhanced-missing",
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 3
+    assert data["succeeded"] == 1
+    assert data["failed"] == 2
+
+    by_id = {item["task_id"]: item for item in data["items"]}
+    assert by_id["tt-retry-enhanced-failed"]["success"] is True
+    assert by_id["tt-retry-enhanced-failed"]["task"]["status"] == "pending"
+    stages = {stage["id"]: stage for stage in by_id["tt-retry-enhanced-failed"]["task"]["stages"]}
+    # Retry from failed node should reset only one stage (earliest by template order: coding).
+    assert stages["tt-retry-enhanced-stage-coding"]["status"] == "pending"
+    assert stages["tt-retry-enhanced-stage-test"]["status"] == "failed"
+    assert by_id["tt-retry-enhanced-running"]["success"] is False
+    assert by_id["tt-retry-enhanced-missing"]["success"] is False

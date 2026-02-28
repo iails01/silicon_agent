@@ -110,3 +110,33 @@ class TaskBatchCreateRequest(BaseModel):
 class TaskBatchCreateResponse(BaseModel):
     created: int
     tasks: List[TaskDetailResponse]
+
+
+class TaskRetryFromStageRequest(BaseModel):
+    """Request payload for retrying a task from a specific failed stage."""
+
+    stage_id: str
+
+
+class TaskBatchRetryRequest(BaseModel):
+    """Request payload for retrying multiple tasks."""
+
+    task_ids: List[str]
+
+
+class TaskBatchRetryItem(BaseModel):
+    """Per-task retry result for batch retry operations."""
+
+    task_id: str
+    success: bool
+    reason: Optional[str] = None
+    task: Optional[TaskDetailResponse] = None
+
+
+class TaskBatchRetryResponse(BaseModel):
+    """Aggregated response for batch retry operations."""
+
+    total: int
+    succeeded: int
+    failed: int
+    items: List[TaskBatchRetryItem]
