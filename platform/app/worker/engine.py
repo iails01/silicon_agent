@@ -266,6 +266,54 @@ async def _pick_pending_task(session: AsyncSession) -> Optional[TaskModel]:
     return result.scalar_one_or_none()
 
 
+async def _has_git_worktree_changes(worktree_path: Optional[str]) -> Optional[bool]:
+    """Return whether worktree has uncommitted changes; None when check cannot be performed."""
+    if not worktree_path:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            "git status --porcelain",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=worktree_path,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None
+        return bool(stdout.decode().strip())
+    except Exception:
+        logger.warning("Failed to verify git changes for worktree %s", worktree_path, exc_info=True)
+        return None
+
+
+async def _ensure_code_stage_has_changes(
+    session: AsyncSession,
+    task: TaskModel,
+    stage: TaskStageModel,
+    worktree_path: Optional[str],
+) -> bool:
+    """Code stage must produce repository changes; otherwise fail fast."""
+    if (stage.stage_name or "").lower() != "code":
+        return True
+
+    changed = await _has_git_worktree_changes(worktree_path)
+    if changed:
+        return True
+
+    reason = (
+        "Code stage produced no repository file changes."
+        if changed is False
+        else "Code stage change verification failed (worktree unavailable or git status failed)."
+    )
+    logger.error("Task %s code stage has no detectable changes: %s", task.id, reason)
+    await mark_stage_failed(session, task, stage, reason)
+    from app.worker.agents import close_agents_for_task
+
+    close_agents_for_task(str(task.id))
+    await _fail_task(session, task, f"Stage {stage.stage_name} failed: {reason}")
+    return False
+
+
 async def _setup_worktree(task: TaskModel) -> tuple[Optional[str], Any]:
     """Create git worktree for the task if enabled. Returns (worktree_path, worktree_mgr)."""
     if not (settings.WORKTREE_ENABLED and task.project and task.project.repo_local_path):
@@ -843,6 +891,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     "Skipping completed stage %s for task %s (resuming)",
                     stage.stage_name, task.id,
                 )
+                if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                    return
                 prior_outputs.append({
                     "stage": stage.stage_name,
                     "output": stage.output_summary or "",
@@ -852,6 +902,9 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     compression.add(compressed)
                 else:
                     logger.warning("Compression failed for resumed stage %s", stage.stage_name)
+                # Resume path should still enforce circuit breaker on accumulated totals.
+                if await _check_circuit_breaker(session, task, stage):
+                    return
                     
             # Check gates for resumed stages
             for stage in group:
@@ -903,6 +956,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
             )
             if result is None:
                 return  # stage failed or circuit breaker
+            if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                return
             prior_outputs.append({"stage": stage.stage_name, "output": result})
             compressed = await _compress_with_log(task, stage, result)
             if compressed is not None:
@@ -989,6 +1044,8 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
                     return
 
                 if result is None:
+                    return
+                if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
                     return
                 prior_outputs.append({"stage": stage_name, "output": result})
                 compressed = await _compress_with_log(task, stage, result)
@@ -1082,6 +1139,8 @@ async def _process_task_graph(
 
     for stage in sorted_stages:
         if stage.status == "completed":
+            if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                return
             completed.add(stage.stage_name)
             prior_outputs.append({
                 "stage": stage.stage_name,
@@ -1089,6 +1148,9 @@ async def _process_task_graph(
             })
             if stage.output_structured:
                 structured_outputs[stage.stage_name] = stage.output_structured
+            # Resume path should still enforce circuit breaker on accumulated totals.
+            if await _check_circuit_breaker(session, task, stage):
+                return
                 
             # Phase 2: Missing check! Resume outstanding gates for completed stages in graph!
             gate_def = gates.get(stage.stage_name)
@@ -1182,6 +1244,8 @@ async def _process_task_graph(
                     return
                 continue
 
+            if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                return
             completed.add(node.name)
             prior_outputs.append({"stage": node.name, "output": result})
             compressed = await _compress_with_log(task, stage, result)
@@ -1240,6 +1304,8 @@ async def _process_task_graph(
                     failed.add(name)
                     continue
 
+                if not await _ensure_code_stage_has_changes(session, task, stage, worktree_path):
+                    return
                 completed.add(name)
                 prior_outputs.append({"stage": name, "output": result})
                 compressed = await _compress_with_log(task, stage, result)

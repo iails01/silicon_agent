@@ -466,7 +466,7 @@ const TaskDetail: React.FC = () => {
       </Card>
 
       <Card title="Description">
-        <Typography.Paragraph>{task.description}</Typography.Paragraph>
+        <ExpandableReport content={task.description || '-'} maxHeight={320} />
       </Card>
     </div>
   );
