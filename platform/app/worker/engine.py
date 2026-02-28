@@ -291,20 +291,36 @@ async def _setup_worktree(task: TaskModel) -> tuple[Optional[str], Any]:
         )
         if worktree_path:
             logger.info("Task %s using worktree: %s", task.id, worktree_path)
-        duration_ms = round((time.monotonic() - worktree_started_at) * 1000, 2)
-        await _emit_system_log(
-            task,
-            event_type="worktree_create_finished",
-            status="success",
-            correlation_id=worktree_corr,
-            response_body={"worktree_path": worktree_path},
-            duration_ms=duration_ms,
-        )
-        await _close_started_system_log(
-            started_log_id=worktree_started_log_id,
-            started_at_monotonic=worktree_started_at,
-            status="success",
-        )
+            duration_ms = round((time.monotonic() - worktree_started_at) * 1000, 2)
+            await _emit_system_log(
+                task,
+                event_type="worktree_create_finished",
+                status="success",
+                correlation_id=worktree_corr,
+                response_body={"worktree_path": worktree_path},
+                duration_ms=duration_ms,
+            )
+            await _close_started_system_log(
+                started_log_id=worktree_started_log_id,
+                started_at_monotonic=worktree_started_at,
+                status="success",
+            )
+        else:
+            duration_ms = round((time.monotonic() - worktree_started_at) * 1000, 2)
+            await _emit_system_log(
+                task,
+                event_type="worktree_create_finished",
+                status="failed",
+                correlation_id=worktree_corr,
+                response_body={"error": "create_worktree_returned_none"},
+                duration_ms=duration_ms,
+            )
+            await _close_started_system_log(
+                started_log_id=worktree_started_log_id,
+                started_at_monotonic=worktree_started_at,
+                status="failed",
+                result="create_worktree_returned_none",
+            )
     except Exception:
         logger.warning(
             "Failed to create worktree for task %s, falling back to tmpdir",
@@ -522,7 +538,7 @@ async def _finalize_task_resources(
     worktree_path: Optional[str],
     sandbox_mgr: Any,
     sandbox_info: Any,
-) -> None:
+) -> bool:
     """Post-completion: extract memories, commit/push worktree, cleanup resources."""
     # Extract memories from this task
     if settings.MEMORY_ENABLED and project_memory_store and prior_outputs:
@@ -585,6 +601,23 @@ async def _finalize_task_resources(
             )
 
     # Worktree: commit, push, and optionally create PR
+    worktree_expected = bool(
+        settings.WORKTREE_ENABLED and task.project and task.project.repo_local_path
+    )
+    if worktree_expected and not worktree_path:
+        await _emit_system_log(
+            task,
+            event_type="worktree_commit_push_finished",
+            status="failed",
+            response_body={"error": "worktree_path_missing"},
+        )
+        await _fail_task(
+            session,
+            task,
+            "Worktree unavailable: worktree_path missing, skip commit/push",
+        )
+        return False
+
     if worktree_mgr and worktree_path:
         worktree_commit_corr = f"worktree-commit-{uuid.uuid4().hex}"
         worktree_commit_started_at = time.monotonic()
@@ -601,6 +634,8 @@ async def _finalize_task_resources(
                 commit_message=f"feat: {task.title}\n\nTask-ID: {task.id}",
                 target_branch=task.target_branch,
             )
+            if not branch:
+                raise RuntimeError("worktree_commit_push_failed_or_no_branch")
             duration_ms = round((time.monotonic() - worktree_commit_started_at) * 1000, 2)
             await _emit_system_log(
                 task,
@@ -615,10 +650,9 @@ async def _finalize_task_resources(
                 started_at_monotonic=worktree_commit_started_at,
                 status="success",
             )
-            if branch:
-                task.branch_name = branch
-                await session.commit()
-            if branch and settings.WORKTREE_AUTO_PR:
+            task.branch_name = branch
+            await session.commit()
+            if settings.WORKTREE_AUTO_PR:
                 pr_corr = f"worktree-pr-{uuid.uuid4().hex}"
                 pr_started_at = time.monotonic()
                 pr_started_log_id = await _emit_system_log(
@@ -653,7 +687,7 @@ async def _finalize_task_resources(
                     started_at_monotonic=pr_started_at,
                     status="success",
                 )
-        except Exception:
+        except Exception as exc:
             logger.warning("Worktree commit/push failed for task %s", task.id, exc_info=True)
             duration_ms = round((time.monotonic() - worktree_commit_started_at) * 1000, 2)
             await _emit_system_log(
@@ -661,7 +695,7 @@ async def _finalize_task_resources(
                 event_type="worktree_commit_push_finished",
                 status="failed",
                 correlation_id=worktree_commit_corr,
-                response_body={"error": "worktree_commit_push_failed"},
+                response_body={"error": "worktree_commit_push_failed", "detail": str(exc)},
                 duration_ms=duration_ms,
             )
             await _close_started_system_log(
@@ -670,6 +704,8 @@ async def _finalize_task_resources(
                 status="failed",
                 result="worktree_commit_push_failed",
             )
+            await _fail_task(session, task, "Worktree commit/push failed")
+            return False
 
         # Cleanup worktree
         cleanup_corr = f"worktree-cleanup-{uuid.uuid4().hex}"
@@ -719,6 +755,8 @@ async def _finalize_task_resources(
             await sandbox_mgr.destroy(str(task.id))
         except Exception:
             logger.warning("Sandbox cleanup failed for task %s", task.id, exc_info=True)
+
+    return True
 
 
 async def _process_task(session: AsyncSession, task: TaskModel) -> None:
@@ -779,10 +817,14 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
             project_memory_store, repo_context, worktree_path, sandbox_info, sandbox_required_error,
         )
         # Finalize and return
-        await _finalize_task_resources(
+        finalized = await _finalize_task_resources(
             session, task, prior_outputs, project_memory_store,
             worktree_mgr, worktree_path, sandbox_mgr, sandbox_info,
         )
+        if not finalized:
+            from app.worker.agents import close_agents_for_task
+            close_agents_for_task(str(task.id))
+            return
         from app.worker.agents import close_agents_for_task
         close_agents_for_task(str(task.id))
         await _complete_task(session, task)
@@ -979,10 +1021,14 @@ async def _process_task(session: AsyncSession, task: TaskModel) -> None:
         stage_index_base += len(group)
 
     # Finalize: extract memories, commit worktree, cleanup resources
-    await _finalize_task_resources(
+    finalized = await _finalize_task_resources(
         session, task, prior_outputs, project_memory_store,
         worktree_mgr, worktree_path, sandbox_mgr, sandbox_info,
     )
+    if not finalized:
+        from app.worker.agents import close_agents_for_task
+        close_agents_for_task(str(task.id))
+        return
 
     # Clean up per-task agents and mark completed
     from app.worker.agents import close_agents_for_task
@@ -1916,8 +1962,8 @@ async def _handle_gate(
         correlation_id=gate_corr,
         response_body={"gate_type": gate_type},
     )
-    # Check if a pending gate already exists for this task and stage
-    result = await session.execute(
+    # 1) Reuse existing pending gate for this task/stage first.
+    pending_result = await session.execute(
         select(HumanGateModel)
         .where(
             HumanGateModel.task_id == task.id,
@@ -1926,7 +1972,7 @@ async def _handle_gate(
         )
     )
     existing_gate = None
-    for row in result.scalars().all():
+    for row in pending_result.scalars().all():
         if row.content and row.content.get("stage") == stage.stage_name:
             existing_gate = row
             break
@@ -1938,6 +1984,61 @@ async def _handle_gate(
             stage.stage_name, gate.id,
         )
     else:
+        # 2) Idempotency: if this stage has already been approved after the latest
+        # completion, do not create a duplicate pending gate during resume/recovery.
+        latest_result = await session.execute(
+            select(HumanGateModel)
+            .where(
+                HumanGateModel.task_id == task.id,
+                HumanGateModel.gate_type == gate_type,
+            )
+            .order_by(HumanGateModel.created_at.desc())
+        )
+        latest_gate_for_stage = None
+        for row in latest_result.scalars().all():
+            if row.content and row.content.get("stage") == stage.stage_name:
+                latest_gate_for_stage = row
+                break
+
+        if (
+            latest_gate_for_stage is not None
+            and latest_gate_for_stage.status == "approved"
+            and (
+                stage.completed_at is None
+                or latest_gate_for_stage.reviewed_at is None
+                or latest_gate_for_stage.reviewed_at >= stage.completed_at
+            )
+        ):
+            duration_ms = round((time.monotonic() - gate_started_at) * 1000, 2)
+            await _emit_system_log(
+                task,
+                stage=stage,
+                event_type="gate_wait_approved",
+                status="success",
+                correlation_id=gate_corr,
+                duration_ms=duration_ms,
+                response_body={
+                    "gate_id": latest_gate_for_stage.id,
+                    "already_approved": True,
+                },
+            )
+            await _close_started_system_log(
+                started_log_id=gate_started_log_id,
+                started_at_monotonic=gate_started_at,
+                status="success",
+                result="gate_already_approved",
+            )
+            logger.info(
+                "Reuse approved gate for stage %s (gate_id=%s)",
+                stage.stage_name,
+                latest_gate_for_stage.id,
+            )
+            return {
+                "result": "approved",
+                "comment": latest_gate_for_stage.review_comment or "",
+                "retry_count": current_retry,
+            }
+
         gate = HumanGateModel(
             gate_type=gate_type,
             task_id=task.id,
