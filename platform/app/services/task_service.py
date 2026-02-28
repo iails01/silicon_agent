@@ -15,6 +15,8 @@ from app.models.template import TaskTemplateModel
 from app.schemas.task import (
     TaskBatchCreateRequest,
     TaskBatchCreateResponse,
+    TaskBatchRetryItem,
+    TaskBatchRetryResponse,
     TaskCreateRequest,
     TaskDecomposeRequest,
     TaskDecomposeResponse,
@@ -260,6 +262,14 @@ class TaskService:
         )
 
     async def retry_task(self, task_id: str) -> Optional[TaskDetailResponse]:
+        """Retry a failed task by resetting failed stages to pending.
+
+        Args:
+            task_id: Task identifier.
+
+        Returns:
+            Updated task detail when task exists, otherwise ``None``.
+        """
         result = await self.session.execute(
             select(TaskModel)
             .options(
@@ -279,52 +289,131 @@ class TaskService:
         task.status = "pending"
         task.completed_at = None
 
-        # Recalculate tokens/cost from completed stages only
-        completed_tokens = 0
+        # Reset failed stages and keep retry count constraints.
         for stage in task.stages:
-            if stage.status == "completed":
-                completed_tokens += stage.tokens_used or 0
-            elif stage.status == "failed":
-                # Phase 2.5: Check per-stage retry limit
-                stage_max_retries = settings.STAGE_DEFAULT_MAX_RETRIES
-                if task.template and task.template.stages:
-                    try:
-                        import json as _json
-                        stage_defs = _json.loads(task.template.stages) if task.template.stages else []
-                        for sd in stage_defs:
-                            if sd.get("name") == stage.stage_name and sd.get("max_retries") is not None:
-                                stage_max_retries = sd["max_retries"]
-                                break
-                    except (ValueError, _json.JSONDecodeError):
-                        pass
+            if stage.status != "failed":
+                continue
 
-                if stage.retry_count >= stage_max_retries:
-                    logger.info(
-                        "Stage %s reached max retries (%d/%d), keeping failed",
-                        stage.stage_name, stage.retry_count, stage_max_retries,
-                    )
-                    continue
+            stage_max_retries = self._resolve_stage_max_retries(task, stage)
+            if stage.retry_count >= stage_max_retries:
+                logger.info(
+                    "Stage %s reached max retries (%d/%d), keeping failed",
+                    stage.stage_name, stage.retry_count, stage_max_retries,
+                )
+                continue
+            self._reset_stage_for_retry(stage, increment_retry=True)
 
-                # Reset failed stage to pending so it can be re-executed
-                stage.status = "pending"
-                stage.error_message = None
-                stage.failure_category = None
-                stage.started_at = None
-                stage.completed_at = None
-                stage.duration_seconds = None
-                stage.tokens_used = 0
-                stage.output_summary = None
-                stage.output_structured = None
-                stage.retry_count += 1
-            # pending stages stay as-is
-
-        task.total_tokens = completed_tokens
-        task.total_cost_rmb = completed_tokens * settings.CB_TOKEN_PRICE_PER_1K / 1000
+        self._recalculate_task_usage(task)
 
         await self.session.commit()
         self.session.expire_all()
 
-        # Re-fetch with eager loading
+        refreshed = await self._load_task_with_relations(task_id)
+        return self._task_to_response(refreshed)
+
+    async def retry_from_stage(self, task_id: str, stage_id: str) -> Optional[TaskDetailResponse]:
+        """Retry a failed task from a specific failed stage.
+
+        Args:
+            task_id: Task identifier.
+            stage_id: Stage identifier that must be in failed status.
+
+        Returns:
+            Updated task detail when the task exists, otherwise ``None``.
+
+        Raises:
+            LookupError: Stage does not exist on the task.
+            ValueError: Task/stage state is not eligible for retry.
+        """
+        task = await self._load_task_with_relations_optional(task_id)
+        if task is None:
+            return None
+        if task.status != "failed":
+            raise ValueError(f"Task status must be failed, got {task.status}")
+
+        target_stage = next((s for s in task.stages if s.id == stage_id), None)
+        if target_stage is None:
+            raise LookupError("Stage not found in task")
+        if target_stage.status != "failed":
+            raise ValueError(f"Stage status must be failed, got {target_stage.status}")
+
+        stage_max_retries = self._resolve_stage_max_retries(task, target_stage)
+        if target_stage.retry_count >= stage_max_retries:
+            raise ValueError(
+                f"Stage retry limit reached ({target_stage.retry_count}/{stage_max_retries})"
+            )
+
+        task.status = "pending"
+        task.completed_at = None
+        self._reset_stage_for_retry(target_stage, increment_retry=True)
+        self._recalculate_task_usage(task)
+
+        await self.session.commit()
+        self.session.expire_all()
+        refreshed = await self._load_task_with_relations(task_id)
+        return self._task_to_response(refreshed)
+
+    async def retry_batch(self, task_ids: List[str]) -> TaskBatchRetryResponse:
+        """Retry multiple failed tasks and return per-task outcomes.
+
+        Args:
+            task_ids: Task identifiers to retry.
+
+        Returns:
+            Aggregated retry result with per-task success/failure details.
+        """
+        items: list[TaskBatchRetryItem] = []
+        succeeded = 0
+
+        for task_id in task_ids:
+            task = await self._load_task_with_relations_optional(task_id)
+            if task is None:
+                items.append(TaskBatchRetryItem(task_id=task_id, success=False, reason="Task not found"))
+                continue
+            if task.status != "failed":
+                items.append(
+                    TaskBatchRetryItem(
+                        task_id=task_id,
+                        success=False,
+                        reason=f"Task status is {task.status}, not failed",
+                    )
+                )
+                continue
+
+            target_stage, reason = self._select_retryable_failed_stage(task)
+            if target_stage is None:
+                items.append(
+                    TaskBatchRetryItem(
+                        task_id=task_id,
+                        success=False,
+                        reason=reason or "No retryable failed stage",
+                    )
+                )
+                continue
+
+            try:
+                retried = await self.retry_from_stage(task_id, target_stage.id)
+            except (LookupError, ValueError) as exc:
+                items.append(TaskBatchRetryItem(task_id=task_id, success=False, reason=str(exc)))
+                continue
+
+            if retried is None:
+                items.append(
+                    TaskBatchRetryItem(task_id=task_id, success=False, reason="Task not found")
+                )
+                continue
+            succeeded += 1
+            items.append(TaskBatchRetryItem(task_id=task_id, success=True, task=retried))
+
+        return TaskBatchRetryResponse(
+            total=len(task_ids),
+            succeeded=succeeded,
+            failed=len(task_ids) - succeeded,
+            items=items,
+        )
+
+    async def _load_task_with_relations_optional(self, task_id: str) -> Optional[TaskModel]:
+        """Load a task with stages/template/project relationships."""
         result = await self.session.execute(
             select(TaskModel)
             .options(
@@ -334,8 +423,75 @@ class TaskService:
             )
             .where(TaskModel.id == task_id)
         )
-        task = result.scalar_one()
-        return self._task_to_response(task)
+        return result.scalar_one_or_none()
+
+    async def _load_task_with_relations(self, task_id: str) -> TaskModel:
+        """Load a task with relations and require it to exist."""
+        task = await self._load_task_with_relations_optional(task_id)
+        if task is None:
+            raise LookupError(f"Task {task_id} not found")
+        return task
+
+    def _resolve_stage_max_retries(self, task: TaskModel, stage: TaskStageModel) -> int:
+        """Resolve max retry count for a stage from template or global default."""
+        stage_max_retries = settings.STAGE_DEFAULT_MAX_RETRIES
+        if task.template and task.template.stages:
+            try:
+                stage_defs = json.loads(task.template.stages) if task.template.stages else []
+                for sd in stage_defs:
+                    if sd.get("name") == stage.stage_name and sd.get("max_retries") is not None:
+                        stage_max_retries = sd["max_retries"]
+                        break
+            except (ValueError, json.JSONDecodeError):
+                pass
+        return int(stage_max_retries)
+
+    def _select_retryable_failed_stage(
+        self, task: TaskModel,
+    ) -> tuple[Optional[TaskStageModel], Optional[str]]:
+        """Pick the next retryable failed stage for batch retry.
+
+        Selection order follows template stage order; if no template is attached,
+        keep current task stage order.
+        """
+        failed_stages = [stage for stage in task.stages if stage.status == "failed"]
+        if not failed_stages:
+            return None, "No failed stage found"
+
+        order_map: dict[str, int] = {}
+        if task.template and task.template.stages:
+            try:
+                stage_defs = json.loads(task.template.stages) if task.template.stages else []
+                order_map = {sd["name"]: int(sd.get("order", idx)) for idx, sd in enumerate(stage_defs)}
+            except (ValueError, json.JSONDecodeError, TypeError):
+                order_map = {}
+
+        failed_stages.sort(key=lambda stage: order_map.get(stage.stage_name, 999))
+        for stage in failed_stages:
+            stage_max_retries = self._resolve_stage_max_retries(task, stage)
+            if stage.retry_count < stage_max_retries:
+                return stage, None
+        return None, "All failed stages reached retry limit"
+
+    def _reset_stage_for_retry(self, stage: TaskStageModel, *, increment_retry: bool) -> None:
+        """Reset stage runtime fields so the worker can execute it again."""
+        stage.status = "pending"
+        stage.error_message = None
+        stage.failure_category = None
+        stage.started_at = None
+        stage.completed_at = None
+        stage.duration_seconds = None
+        stage.tokens_used = 0
+        stage.output_summary = None
+        stage.output_structured = None
+        if increment_retry:
+            stage.retry_count += 1
+
+    def _recalculate_task_usage(self, task: TaskModel) -> None:
+        """Recompute task token/cost totals from completed stages only."""
+        completed_tokens = sum((stage.tokens_used or 0) for stage in task.stages if stage.status == "completed")
+        task.total_tokens = completed_tokens
+        task.total_cost_rmb = completed_tokens * settings.CB_TOKEN_PRICE_PER_1K / 1000
 
     @staticmethod
     def _task_to_response(task: TaskModel) -> TaskDetailResponse:
