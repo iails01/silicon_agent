@@ -3,7 +3,7 @@ import {
   Button, Tag, message, Modal, Radio, Input, Table, Space, Popconfirm, Alert, Spin, Select,
 } from 'antd';
 import {
-  PlusOutlined, DeleteOutlined, RobotOutlined, FormOutlined, PlusCircleOutlined,
+  PlusOutlined, DeleteOutlined, RobotOutlined, FormOutlined, PlusCircleOutlined, ReloadOutlined,
 } from '@ant-design/icons';
 import { ProTable } from '@ant-design/pro-components';
 import type { ActionType, ProColumns } from '@ant-design/pro-components';
@@ -11,6 +11,7 @@ import { Link } from 'react-router-dom';
 import { listTasks, decomposePrd, batchCreateTasks, createTask } from '@/services/taskApi';
 import { useTemplateList } from '@/hooks/useTemplates';
 import { useProjectList } from '@/hooks/useProjects';
+import { useBatchRetryTasks } from '@/hooks/useTasks';
 
 import { formatTimestamp, formatCost } from '@/utils/formatters';
 import type { Task, DecomposedTask } from '@/types/task';
@@ -44,6 +45,9 @@ const TaskList: React.FC = () => {
   const actionRef = useRef<ActionType>();
   const { data: templateData } = useTemplateList();
   const { data: projectData } = useProjectList();
+  const batchRetryTasks = useBatchRetryTasks();
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [selectedRows, setSelectedRows] = useState<Task[]>([]);
 
 
   // Wizard state
@@ -192,6 +196,41 @@ const TaskList: React.FC = () => {
       ...prev,
       { key: `task-${Date.now()}`, title: '', description: '', priority: 'medium' },
     ]);
+  };
+
+  const handleBatchRetry = async () => {
+    if (selectedRows.length === 0) {
+      message.warning('请先选择任务');
+      return;
+    }
+
+    const failedTaskIds = selectedRows
+      .filter((row) => row.status === 'failed')
+      .map((row) => row.id);
+
+    if (failedTaskIds.length === 0) {
+      message.warning('所选任务中没有失败任务可重试');
+      return;
+    }
+
+    try {
+      const result = await batchRetryTasks.mutateAsync({ task_ids: failedTaskIds });
+      const firstFailed = result.items.find((item) => !item.success);
+
+      if (result.failed > 0) {
+        message.warning(
+          `批量重试已提交：成功 ${result.succeeded}，失败 ${result.failed}${firstFailed?.reason ? `（示例原因：${firstFailed.reason}）` : ''}`
+        );
+      } else {
+        message.success(`批量重试已提交：成功 ${result.succeeded}，失败 ${result.failed}`);
+      }
+
+      setSelectedRowKeys([]);
+      setSelectedRows([]);
+      actionRef.current?.reload();
+    } catch (err: any) {
+      message.error(err?.response?.data?.detail || '批量重试失败');
+    }
   };
 
   // Build template/project options
@@ -562,6 +601,13 @@ const TaskList: React.FC = () => {
         actionRef={actionRef}
         rowKey="id"
         columns={columns}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys, rows) => {
+            setSelectedRowKeys(keys);
+            setSelectedRows(rows);
+          },
+        }}
         request={async (params) => {
           const res = await listTasks({
             status: params.status,
@@ -571,6 +617,22 @@ const TaskList: React.FC = () => {
           return { data: res.tasks, total: res.total, success: true };
         }}
         toolBarRender={() => [
+          <Popconfirm
+            key="retry-batch-confirm"
+            title="确认批量重试选中的失败任务？"
+            onConfirm={handleBatchRetry}
+            okButtonProps={{ loading: batchRetryTasks.isPending }}
+            disabled={selectedRowKeys.length === 0}
+          >
+            <Button
+              key="retry-batch"
+              icon={<ReloadOutlined />}
+              loading={batchRetryTasks.isPending}
+              disabled={selectedRowKeys.length === 0}
+            >
+              批量重试
+            </Button>
+          </Popconfirm>,
           <Button key="create" type="primary" icon={<PlusOutlined />} onClick={handleOpenWizard}>
             New Task
           </Button>,

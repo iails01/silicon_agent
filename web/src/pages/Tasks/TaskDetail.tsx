@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Card, Collapse, Descriptions, Empty, Tag, Button, Spin, Typography, Space, message, Timeline, Tabs } from 'antd';
 import { ArrowLeftOutlined, StopOutlined, ReloadOutlined, CodeOutlined, RobotOutlined, LoadingOutlined, DownOutlined, LeftOutlined } from '@ant-design/icons';
-import { useTask, useCancelTask, useRetryTask } from '@/hooks/useTasks';
+import { useTask, useCancelTask, useRetryTaskFromStage } from '@/hooks/useTasks';
 import { useStageLogStore } from '@/stores/stageLogStore';
 import { listTaskLogs } from '@/services/taskLogApi';
 import { useGateList } from '@/hooks/useGates';
@@ -194,7 +194,7 @@ const TaskDetail: React.FC = () => {
   };
 
   const cancelTask = useCancelTask();
-  const retryTask = useRetryTask();
+  const retryTaskFromStage = useRetryTaskFromStage();
 
   if (isLoading || !task) {
     return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;
@@ -203,6 +203,7 @@ const TaskDetail: React.FC = () => {
   const duration = task.created_at && task.completed_at
     ? (new Date(task.completed_at).getTime() - new Date(task.created_at).getTime()) / 1000
     : null;
+  const firstFailedStage = task.stages.find((stage) => stage.status === 'failed');
 
   return (
     <div>
@@ -228,12 +229,19 @@ const TaskDetail: React.FC = () => {
             type="primary"
             icon={<ReloadOutlined />}
             onClick={async () => {
-              await retryTask.mutateAsync(task.id);
-              message.success('任务已重新提交，将从失败阶段继续执行');
+              if (!firstFailedStage) {
+                message.warning('未找到可重试的失败节点');
+                return;
+              }
+              await retryTaskFromStage.mutateAsync({
+                id: task.id,
+                req: { stage_id: firstFailedStage.id },
+              });
+              message.success('任务已重新提交，将从失败节点继续执行');
             }}
-            loading={retryTask.isPending}
+            loading={retryTaskFromStage.isPending}
           >
-            重试任务
+            从失败节点重试
           </Button>
         )}
       </Space>
@@ -406,16 +414,19 @@ const TaskDetail: React.FC = () => {
                                 <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
                                   {stage.error_message}
                                 </Typography.Text>
-                                {task.status === 'failed' && (
+                                {task.status === 'failed' && stage.status === 'failed' && (
                                   <Button
                                     type="primary"
                                     size="small"
                                     icon={<ReloadOutlined />}
                                     onClick={async () => {
-                                      await retryTask.mutateAsync(task.id);
-                                      message.success('任务已重新提交，将从失败阶段继续执行');
+                                      await retryTaskFromStage.mutateAsync({
+                                        id: task.id,
+                                        req: { stage_id: stage.id },
+                                      });
+                                      message.success('任务已重新提交，将从失败节点继续执行');
                                     }}
-                                    loading={retryTask.isPending}
+                                    loading={retryTaskFromStage.isPending}
                                   >
                                     从此阶段重试
                                   </Button>

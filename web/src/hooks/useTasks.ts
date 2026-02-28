@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { listTasks, createTask, cancelTask, retryTask, getTask } from '@/services/taskApi';
-import type { TaskCreateRequest } from '@/types/task';
+import { listTasks, createTask, cancelTask, retryTask, retryTaskFromStage, retryTasksBatch, getTask } from '@/services/taskApi';
+import type { TaskCreateRequest, TaskBatchRetryRequest, TaskRetryFromStageRequest } from '@/types/task';
 
 export function useTaskList(params?: {
   status?: string;
@@ -62,3 +62,33 @@ export function useRetryTask() {
   });
 }
 
+/**
+ * Retry a failed task from the specified failed stage.
+ * @returns Mutation object for stage-level task retry.
+ */
+export function useRetryTaskFromStage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, req }: { id: string; req: TaskRetryFromStageRequest }) => retryTaskFromStage(id, req),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['task', vars.id] });
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['cockpit'] });
+    },
+  });
+}
+
+/**
+ * Retry multiple failed tasks in batch.
+ * @returns Mutation object for batch task retry.
+ */
+export function useBatchRetryTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: TaskBatchRetryRequest) => retryTasksBatch(req),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['cockpit'] });
+    },
+  });
+}

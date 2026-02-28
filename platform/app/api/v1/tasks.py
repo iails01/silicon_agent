@@ -8,11 +8,14 @@ from app.dependencies import get_task_service
 from app.schemas.task import (
     TaskBatchCreateRequest,
     TaskBatchCreateResponse,
+    TaskBatchRetryRequest,
+    TaskBatchRetryResponse,
     TaskCreateRequest,
     TaskDecomposeRequest,
     TaskDecomposeResponse,
     TaskDetailResponse,
     TaskListResponse,
+    TaskRetryFromStageRequest,
     TaskStageResponse,
 )
 from app.services.task_service import TaskService
@@ -62,6 +65,15 @@ async def batch_create_tasks(
     return await service.batch_create(request)
 
 
+@router.post("/retry-batch", response_model=TaskBatchRetryResponse)
+async def retry_tasks_batch(
+    request: TaskBatchRetryRequest,
+    service: TaskService = Depends(get_task_service),
+):
+    """Retry multiple failed tasks in one request."""
+    return await service.retry_batch(request.task_ids)
+
+
 @router.get("/{task_id}", response_model=TaskDetailResponse)
 async def get_task(task_id: str, service: TaskService = Depends(get_task_service)):
     task = await service.get_task(task_id)
@@ -86,6 +98,25 @@ async def cancel_task(task_id: str, service: TaskService = Depends(get_task_serv
 @router.post("/{task_id}/retry", response_model=TaskDetailResponse)
 async def retry_task(task_id: str, service: TaskService = Depends(get_task_service)):
     task = await service.retry_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@router.post("/{task_id}/retry-from-stage", response_model=TaskDetailResponse)
+async def retry_task_from_stage(
+    task_id: str,
+    request: TaskRetryFromStageRequest,
+    service: TaskService = Depends(get_task_service),
+):
+    """Retry a failed task from a specific failed stage node."""
+    try:
+        task = await service.retry_from_stage(task_id, request.stage_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Stage not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task

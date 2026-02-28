@@ -13,12 +13,13 @@ Architecture (方式1 — 整体容器化):
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
-import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import httpx
 
@@ -38,10 +39,10 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _concurrency_sem
 
 
-async def _run(cmd: str, timeout: float = 60) -> tuple[int, str, str]:
-    """Run a shell command asynchronously."""
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
+async def _run(cmd: list[str], timeout: float = 60) -> tuple[int, str, str]:
+    """Run a command asynchronously without shell interpolation."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -83,6 +84,7 @@ class SandboxResult:
     total_tokens: int = 0
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
+    streamed: bool = False
 
 
 class SandboxManager:
@@ -225,9 +227,13 @@ class SandboxManager:
         skill_dirs: Optional[list[str]] = None,
         workdir: str = "/workspace",
         timeout: int = 300,
+        on_event: Optional[Callable[[dict[str, Any]], Awaitable[None] | None]] = None,
     ) -> SandboxResult:
-        """Execute a stage in the sandbox container via HTTP."""
-        url = f"http://{info.host}:{info.port}/execute"
+        """Execute a stage in the sandbox container via HTTP.
+
+        Prefer streaming endpoint (/execute_stream). When unavailable, fall back
+        to legacy endpoint (/execute).
+        """
         payload = {
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
@@ -245,17 +251,86 @@ class SandboxManager:
             info.container_name, model or "default", timeout,
         )
 
+        request_timeout = httpx.Timeout(timeout + 30, connect=10)
+        stream_url = f"http://{info.host}:{info.port}/execute_stream"
+
         try:
-            resp = await self.http_client.post(
-                url, json=payload,
-                timeout=httpx.Timeout(timeout + 30, connect=10),
-            )
-            data = resp.json()
+            async with self.http_client.stream(
+                "POST",
+                stream_url,
+                json=payload,
+                timeout=request_timeout,
+            ) as resp:
+                if resp.status_code == 404:
+                    logger.info(
+                        "Sandbox stream endpoint is unavailable on %s, fallback to /execute",
+                        info.container_name,
+                    )
+                    return await self._execute_stage_legacy(
+                        info,
+                        payload=payload,
+                        timeout=request_timeout,
+                    )
+
+                resp.raise_for_status()
+                final_payload: Optional[dict[str, Any]] = None
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Ignored malformed sandbox stream payload from %s: %s",
+                            info.container_name,
+                            line[:200],
+                        )
+                        continue
+                    if not isinstance(parsed, dict):
+                        continue
+                    event_type = str(parsed.get("type") or "")
+                    event_data = parsed.get("data")
+                    normalized_data = event_data if isinstance(event_data, dict) else {}
+                    if event_type == "final":
+                        final_payload = normalized_data
+                        break
+                    if on_event is not None:
+                        callback_result = on_event(
+                            {"type": event_type, "data": normalized_data}
+                        )
+                        if inspect.isawaitable(callback_result):
+                            await callback_result
+
+                if final_payload is None:
+                    return SandboxResult(
+                        error=(
+                            f"Sandbox stream ended without final event: {info.container_name}"
+                        ),
+                        streamed=True,
+                    )
+
+                return SandboxResult(
+                    text_content=str(final_payload.get("text_content", "")),
+                    total_tokens=int(final_payload.get("total_tokens", 0) or 0),
+                    tool_calls=(
+                        final_payload.get("tool_calls", [])
+                        if isinstance(final_payload.get("tool_calls"), list)
+                        else []
+                    ),
+                    error=(
+                        str(final_payload.get("error"))
+                        if final_payload.get("error") is not None
+                        else None
+                    ),
+                    streamed=True,
+                )
+        except httpx.HTTPStatusError as e:
             return SandboxResult(
-                text_content=data.get("text_content", ""),
-                total_tokens=data.get("total_tokens", 0),
-                tool_calls=data.get("tool_calls", []),
-                error=data.get("error"),
+                error=(
+                    f"Sandbox HTTP {e.response.status_code} from "
+                    f"{info.container_name}: {e.response.text[:500]}"
+                ),
+                streamed=True,
             )
         except httpx.TimeoutException:
             return SandboxResult(error=f"HTTP timeout after {timeout}s to sandbox {info.container_name}")
@@ -263,6 +338,29 @@ class SandboxManager:
             return SandboxResult(error=f"Cannot connect to sandbox {info.container_name}: {e}")
         except Exception as e:
             return SandboxResult(error=f"Sandbox execution error: {e}")
+
+    async def _execute_stage_legacy(
+        self,
+        info: SandboxInfo,
+        *,
+        payload: dict[str, Any],
+        timeout: httpx.Timeout,
+    ) -> SandboxResult:
+        """Execute stage against legacy non-streaming endpoint (/execute)."""
+        url = f"http://{info.host}:{info.port}/execute"
+        resp = await self.http_client.post(
+            url,
+            json=payload,
+            timeout=timeout,
+        )
+        data = resp.json()
+        return SandboxResult(
+            text_content=data.get("text_content", ""),
+            total_tokens=data.get("total_tokens", 0),
+            tool_calls=data.get("tool_calls", []),
+            error=data.get("error"),
+            streamed=False,
+        )
 
     async def destroy(self, task_id: str) -> None:
         """Destroy a task's sandbox container and release resources."""
@@ -292,31 +390,36 @@ class SandboxManager:
         container_name: str,
         image: str,
         workspace: str,
-    ) -> str:
+    ) -> list[str]:
         """Build the docker run command with security constraints."""
         parts = [
-            "docker run -d",
-            f"--name {container_name}",
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container_name,
             # Resource limits
             f"--cpus={settings.SANDBOX_CPUS}",
             f"--memory={settings.SANDBOX_MEMORY}",
             f"--memory-swap={settings.SANDBOX_MEMORY}",
             f"--pids-limit={settings.SANDBOX_PIDS_LIMIT}",
-            "--ulimit nofile=1024:2048",
+            "--ulimit",
+            "nofile=1024:2048",
             # Security
             "--security-opt=no-new-privileges",
             "--cap-drop=ALL",
             # Filesystem
-            f"--mount type=bind,src={workspace},dst=/workspace",
+            "--mount",
+            f"type=bind,src={workspace},dst=/workspace",
         ]
 
         if settings.SANDBOX_READONLY_ROOT:
             parts.append("--read-only")
-            parts.append("--tmpfs /tmp:size=512m")
-            parts.append("--tmpfs /home/agent:size=256m")
+            parts.extend(["--tmpfs", "/tmp:size=512m"])
+            parts.extend(["--tmpfs", "/home/agent:size=256m"])
 
         # Network — use custom sandbox network if it exists, else host
-        parts.append(f"--network={settings.SANDBOX_NETWORK}")
+        parts.extend(["--network", settings.SANDBOX_NETWORK])
 
         # LLM environment (platform-native + SkillKit compatibility env keys)
         llm_env = build_sandbox_llm_env(
@@ -326,11 +429,11 @@ class SandboxManager:
             agent_port=settings.SANDBOX_AGENT_PORT,
         )
         for key, value in llm_env.items():
-            parts.append(f"-e {key}={shlex.quote(value)}")
+            parts.extend(["-e", f"{key}={value}"])
 
         parts.append(image)
 
-        return " ".join(parts)
+        return parts
 
     async def _resolve_container_host(self, container_name: str) -> Optional[str]:
         """Resolve the container's IP address on the sandbox network."""
@@ -338,9 +441,13 @@ class SandboxManager:
 
         # Try Docker network inspect to get container IP
         rc, out, err = await _run(
-            f"docker inspect -f "
-            f"'{{{{.NetworkSettings.Networks.{network}.IPAddress}}}}' "
-            f"{container_name}",
+            [
+                "docker",
+                "inspect",
+                "-f",
+                f"{{{{.NetworkSettings.Networks.{network}.IPAddress}}}}",
+                container_name,
+            ],
             timeout=10,
         )
         if rc == 0 and out.strip("' \n"):
@@ -350,8 +457,13 @@ class SandboxManager:
 
         # Fallback: try to get IP from any network
         rc, out, err = await _run(
-            f"docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{.IPAddress}}}}{{{{end}}}}' "
-            f"{container_name}",
+            [
+                "docker",
+                "inspect",
+                "-f",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                container_name,
+            ],
             timeout=10,
         )
         if rc == 0 and out.strip("' \n"):
@@ -387,7 +499,7 @@ class SandboxManager:
 
     async def _force_remove(self, container_name: str) -> None:
         """Force-remove a container."""
-        rc, _, err = await _run(f"docker rm -f {container_name}", timeout=30)
+        rc, _, err = await _run(["docker", "rm", "-f", container_name], timeout=30)
         if rc != 0:
             logger.warning("Failed to remove container %s: %s", container_name, err)
 
