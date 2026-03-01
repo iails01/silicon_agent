@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -89,10 +90,82 @@ class ContainerAgentRunner(AgentRunner):
         self.default_cwd = default_cwd
         self.allowed_tools = allowed_tools or _ALL_TOOLS
         self.tool_calls_log: list[dict[str, Any]] = []
+        # Default enabled for incident forensics; set SANDBOX_DUMP_MODEL_API_RESPONSE=false to disable.
+        raw_dump_flag = os.environ.get("SANDBOX_DUMP_MODEL_API_RESPONSE", "true")
+        self.dump_model_api_response = raw_dump_flag.strip().lower() == "true"
+        self.model_api_raw_log_path = os.environ.get(
+            "SANDBOX_MODEL_API_RAW_LOG_PATH",
+            "/workspace/.agent_logs/model_api_raw_responses.jsonl",
+        )
 
     def get_tools(self):
         tools = super().get_tools()
         return [t for t in tools if t["function"]["name"] in self.allowed_tools]
+
+    @staticmethod
+    def _to_jsonable(value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            with contextlib.suppress(Exception):
+                return value.model_dump(mode="json")
+            with contextlib.suppress(Exception):
+                return value.model_dump()
+        if hasattr(value, "to_dict"):
+            with contextlib.suppress(Exception):
+                return value.to_dict()
+        with contextlib.suppress(Exception):
+            json.dumps(value, ensure_ascii=False)
+            return value
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+    def _append_model_api_raw_log(self, *, request_kwargs: dict[str, Any], response_obj: Any) -> None:
+        if not self.dump_model_api_response:
+            return
+        try:
+            path = Path(self.model_api_raw_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+                "model": self.config.model,
+                "llm_base_url": (
+                    self.config.base_url
+                    or os.environ.get("OPENAI_BASE_URL")
+                    or os.environ.get("LLM_BASE_URL")
+                    or ""
+                ),
+                "request": self._to_jsonable(request_kwargs),
+                "response": self._to_jsonable(response_obj),
+            }
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False))
+                f.write("\n")
+        except Exception:
+            logger.exception("Failed to write raw model API response log")
+
+    async def _call_llm(self, messages):
+        """Intercept raw model API responses from SkillKit -> LLM_BASE_URL."""
+        client = getattr(self, "client", None)
+        completions = (
+            getattr(getattr(getattr(client, "chat", None), "completions", None), "create", None)
+            if client is not None
+            else None
+        )
+        if completions is None:
+            return await super()._call_llm(messages)
+
+        async def _wrapped_create(*args, **kwargs):
+            raw_response = await original_create(*args, **kwargs)
+            self._append_model_api_raw_log(
+                request_kwargs=dict(kwargs),
+                response_obj=raw_response,
+            )
+            return raw_response
+
+        original_create = completions
+        self.client.chat.completions.create = _wrapped_create
+        try:
+            return await super()._call_llm(messages)
+        finally:
+            self.client.chat.completions.create = original_create
 
     async def _execute_tool(self, tool_call, on_output=None):
         name = tool_call.get("name", "")
