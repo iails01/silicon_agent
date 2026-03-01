@@ -133,7 +133,7 @@ const ExpandableReport: React.FC<{ content: string; maxHeight?: number }> = ({ c
             style={{ fontSize: 13, color: '#8c8c8c', padding: 0 }}
             icon={expanded ? <DownOutlined /> : <LeftOutlined />}
           >
-            {expanded ? 'Collapse' : 'Expand all'}
+            {expanded ? 'Collapse all' : 'Expand all'}
           </Button>
         </div>
       )}
@@ -477,7 +477,7 @@ const TaskDetail: React.FC = () => {
       </Card>
 
       <Card title="Description">
-        <Typography.Paragraph>{task.description}</Typography.Paragraph>
+        <ExpandableReport content={task.description || '-'} maxHeight={320} />
       </Card>
     </div>
   );

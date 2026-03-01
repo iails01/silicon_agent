@@ -64,10 +64,11 @@ class Settings(BaseSettings):
     ESTIMATED_HOURS_PER_TASK: float = 8.0
     HOURLY_RATE_RMB: float = 150.0
 
-    # Git worktree isolation for coding agents
+    # Workspace: true=worktree, false=tmp clone
     WORKTREE_ENABLED: bool = False
     WORKTREE_BASE_DIR: str = "/var/lib/silicon_agent/worktrees"
-    WORKTREE_AUTO_PR: bool = False  # auto-create PR on task completion
+    # Empty means `${WORKTREE_BASE_DIR}/repos`
+    WORKTREE_REPO_CACHE_DIR: str = ""
 
     # Container sandbox configuration
     SANDBOX_ENABLED: bool = False
