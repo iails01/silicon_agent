@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd platform && pytest tests/ -q --tb=short || exit 2",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}
