@@ -34,18 +34,27 @@ except ImportError:
     logger.error("SkillKit not available in container — cannot execute agent stages")
     sys.exit(1)
 
+try:
+    from sandbox.tool_policy import (
+        DEFAULT_FALLBACK_CORE_TOOLS,
+        DEFAULT_FALLBACK_TOOL_ARGUMENT_HINTS,
+        ToolExecutionPolicyMixin,
+        discover_tool_catalog,
+        sanitize_requested_tools,
+    )
+except ImportError:
+    from tool_policy import (  # type: ignore[no-redef]
+        DEFAULT_FALLBACK_CORE_TOOLS,
+        DEFAULT_FALLBACK_TOOL_ARGUMENT_HINTS,
+        ToolExecutionPolicyMixin,
+        discover_tool_catalog,
+        sanitize_requested_tools,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Sandboxed runner with tool filtering (mirrors platform SandboxedAgentRunner)
 # ---------------------------------------------------------------------------
-_FALLBACK_CORE_TOOLS = {"read", "write", "execute", "execute_script", "skill"}
-_FALLBACK_TOOL_ARGUMENT_HINTS: dict[str, str] = {
-    "execute": '{"command":"<shell command>","cwd":"<optional path>"}',
-    "execute_script": '{"script":"<shell script>","cwd":"<optional path>"}',
-    "read": '{"path":"<file path>"}',
-    "write": '{"path":"<file path>","content":"<file content>"}',
-    "skill": '{"name":"<skill name>","arguments":"<optional string>"}',
-}
 _ALL_TOOLS: set[str] = set()
 _TOOL_ARGUMENT_HINTS: dict[str, str] = {}
 
@@ -85,100 +94,30 @@ def _hydrate_skillkit_env_from_llm_env() -> list[str]:
     return applied
 
 
-def _schema_to_hint(parameters: dict[str, Any]) -> str:
-    properties = parameters.get("properties")
-    if not isinstance(properties, dict) or not properties:
-        return '{"...":"..."}'
-    example: dict[str, Any] = {}
-    for key, spec in properties.items():
-        if not isinstance(key, str):
-            continue
-        type_name = spec.get("type") if isinstance(spec, dict) else None
-        if type_name == "string":
-            example[key] = f"<{key}>"
-        elif type_name == "integer":
-            example[key] = 0
-        elif type_name == "number":
-            example[key] = 0
-        elif type_name == "boolean":
-            example[key] = False
-        elif type_name == "array":
-            example[key] = []
-        elif type_name == "object":
-            example[key] = {}
-        else:
-            example[key] = "<value>"
-    return json.dumps(example, ensure_ascii=False, separators=(",", ":"))
-
-
-def _discover_tool_catalog() -> tuple[set[str], dict[str, str]]:
-    try:
-        skill_dirs = []
-        shared = Path("/skills/shared")
-        if shared.is_dir():
-            skill_dirs.append(shared)
-        probe = AgentRunner.create(
-            skill_dirs=skill_dirs,
-            system_prompt="",
-            enable_tools=True,
-            load_context_files=False,
-            max_turns=1,
-        )
-        discovered_tools: set[str] = set()
-        discovered_hints: dict[str, str] = {}
-        for tool in probe.get_tools():
-            if not isinstance(tool, dict):
-                continue
-            function_info = tool.get("function")
-            if not isinstance(function_info, dict):
-                continue
-            name = function_info.get("name")
-            parameters = function_info.get("parameters")
-            if not isinstance(name, str):
-                continue
-            discovered_tools.add(name)
-            if isinstance(parameters, dict):
-                discovered_hints[name] = _schema_to_hint(parameters)
-        all_tools = set(_FALLBACK_CORE_TOOLS) | discovered_tools
-        hints = dict(_FALLBACK_TOOL_ARGUMENT_HINTS)
-        hints.update(discovered_hints)
-        return all_tools, hints
-    except Exception:
-        logger.warning("Failed to discover sandbox tool catalog from SkillKit; fallback to defaults", exc_info=True)
-        return set(_FALLBACK_CORE_TOOLS), dict(_FALLBACK_TOOL_ARGUMENT_HINTS)
-
-
-_ALL_TOOLS, _TOOL_ARGUMENT_HINTS = _discover_tool_catalog()
-
-
-def _build_invalid_tool_args_error(
-    *,
-    tool_name: str,
-    raw_args: Any,
-    detail: str,
-    received_type: str | None = None,
-) -> str:
-    expected = _TOOL_ARGUMENT_HINTS.get(tool_name, '{"...":"..."}')
-    if isinstance(raw_args, str):
-        preview = raw_args
-    else:
-        preview = json.dumps(raw_args, ensure_ascii=False, default=str)
-    preview = preview.replace("\n", "\\n")
-    if len(preview) > 160:
-        preview = f"{preview[:160]}..."
-    type_hint = f"Received type: {received_type}. " if received_type else ""
-    return (
-        f"Error: Invalid arguments for tool {tool_name}. "
-        f"{detail}. "
-        f"{type_hint}"
-        f"Expected format: {expected}. "
-        "Please resend this tool call with a valid JSON object in function.arguments. "
-        "If arguments were truncated, split content and retry. "
-        f"arguments_preview={preview}"
+def _create_tool_probe_runner():
+    skill_dirs = []
+    shared = Path("/skills/shared")
+    if shared.is_dir():
+        skill_dirs.append(shared)
+    return AgentRunner.create(
+        skill_dirs=skill_dirs,
+        system_prompt="",
+        enable_tools=True,
+        load_context_files=False,
+        max_turns=1,
     )
 
 
-class ContainerAgentRunner(AgentRunner):
+_ALL_TOOLS, _TOOL_ARGUMENT_HINTS = discover_tool_catalog(
+    create_probe_runner=_create_tool_probe_runner,
+    fallback_core_tools=DEFAULT_FALLBACK_CORE_TOOLS,
+    fallback_hints=DEFAULT_FALLBACK_TOOL_ARGUMENT_HINTS,
+    logger=logger,
+    warning_message="Failed to discover sandbox tool catalog from SkillKit; fallback to defaults",
+)
+
+
+class ContainerAgentRunner(ToolExecutionPolicyMixin, AgentRunner):
     """AgentRunner with tool filtering and cwd injection, running inside the container."""
 
     def __init__(
@@ -191,6 +130,7 @@ class ContainerAgentRunner(AgentRunner):
         super().__init__(*args, **kwargs)
         self.default_cwd = default_cwd
         self.allowed_tools = allowed_tools or _ALL_TOOLS
+        self._tool_argument_hints = _TOOL_ARGUMENT_HINTS
         self.tool_calls_log: list[dict[str, Any]] = []
         # Default enabled for incident forensics; set SANDBOX_DUMP_MODEL_API_RESPONSE=false to disable.
         raw_dump_flag = os.environ.get("SANDBOX_DUMP_MODEL_API_RESPONSE", "true")
@@ -203,6 +143,26 @@ class ContainerAgentRunner(AgentRunner):
     def get_tools(self):
         tools = super().get_tools()
         return [t for t in tools if t["function"]["name"] in self.allowed_tools]
+
+    def _append_tool_call_log(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        started_at: float,
+        result_preview: str,
+        status: str,
+    ) -> None:
+        elapsed_ms = round((time.monotonic() - started_at) * 1000, 2)
+        self.tool_calls_log.append(
+            {
+                "tool_name": tool_name,
+                "args": args,
+                "duration_ms": elapsed_ms,
+                "result_preview": result_preview[:500],
+                "status": status,
+            }
+        )
 
     @staticmethod
     def _to_jsonable(value: Any) -> Any:
@@ -269,97 +229,65 @@ class ContainerAgentRunner(AgentRunner):
         finally:
             self.client.chat.completions.create = original_create
 
+    async def _execute_tool_base(self, tool_call, on_output=None) -> str:
+        return await super()._execute_tool(tool_call, on_output)
+
     async def _execute_tool(self, tool_call, on_output=None):
-        name = tool_call.get("name", "")
-        started = time.monotonic()
-        args: dict[str, Any] = {}
+        return await self._execute_tool_with_policy(tool_call, on_output=on_output)
 
-        raw_args = tool_call.get("arguments", "{}")
-        if isinstance(raw_args, dict):
-            parsed_args: Any = raw_args
-        elif isinstance(raw_args, str):
-            try:
-                parsed_args = json.loads(raw_args or "{}")
-            except json.JSONDecodeError as exc:
-                error_msg = _build_invalid_tool_args_error(
-                    tool_name=name,
-                    raw_args=raw_args,
-                    detail=(
-                        "JSON decode error: "
-                        f"{exc.msg} at line {exc.lineno}, column {exc.colno}"
-                    ),
-                )
-                elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-                self.tool_calls_log.append(
-                    {
-                        "tool_name": name,
-                        "args": {},
-                        "duration_ms": elapsed_ms,
-                        "result_preview": error_msg[:500],
-                        "status": "failed",
-                    }
-                )
-                return error_msg
-        else:
-            parsed_args = raw_args
-        if not isinstance(parsed_args, dict):
-            error_msg = _build_invalid_tool_args_error(
-                tool_name=name,
-                raw_args=raw_args,
-                detail="Arguments must decode to a JSON object",
-                received_type=type(parsed_args).__name__,
-            )
-            elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-            self.tool_calls_log.append(
-                {
-                    "tool_name": name,
-                    "args": {},
-                    "duration_ms": elapsed_ms,
-                    "result_preview": error_msg[:500],
-                    "status": "failed",
-                }
-            )
-            return error_msg
-        args = parsed_args
-
-        # Inject default cwd for execution tools
-        if self.default_cwd and name in ("execute", "execute_script"):
-            if not args.get("cwd"):
-                args["cwd"] = self.default_cwd
-        tool_call = {**tool_call, "arguments": json.dumps(args, ensure_ascii=False)}
-
-        # Block disallowed tools
-        if name not in self.allowed_tools:
-            error_msg = f"Error: {name} is not allowed for this role"
-            elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-            self.tool_calls_log.append(
-                {
-                    "tool_name": name,
-                    "args": args,
-                    "duration_ms": elapsed_ms,
-                    "result_preview": error_msg[:500],
-                    "status": "failed",
-                }
-            )
-            return error_msg
-
-        result = await super()._execute_tool(tool_call, on_output)
-
-        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-        self.tool_calls_log.append(
-            {
-                "tool_name": name,
-                "args": args,
-                "duration_ms": elapsed_ms,
-                "result_preview": str(result)[:500] if result else "",
-                "status": (
-                    "failed"
-                    if str(result).startswith(("Error:", "Exit code:"))
-                    else "success"
-                ),
-            }
+    def _on_tool_validation_error(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        error_msg: str,
+        started_at: float,
+    ) -> str:
+        self._append_tool_call_log(
+            tool_name=tool_name,
+            args=args,
+            started_at=started_at,
+            result_preview=error_msg,
+            status="failed",
         )
+        return error_msg
 
+    def _on_tool_disallowed(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        error_msg: str,
+        started_at: float,
+    ) -> str:
+        self._append_tool_call_log(
+            tool_name=tool_name,
+            args=args,
+            started_at=started_at,
+            result_preview=error_msg,
+            status="failed",
+        )
+        return error_msg
+
+    def _on_tool_result(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        result: str,
+        started_at: float,
+    ) -> str:
+        self._append_tool_call_log(
+            tool_name=tool_name,
+            args=args,
+            started_at=started_at,
+            result_preview=str(result) if result else "",
+            status=(
+                "failed"
+                if str(result).startswith(("Error:", "Exit code:"))
+                else "success"
+            ),
+        )
         return result
 
 
@@ -377,10 +305,9 @@ def _parse_request_body(body: dict[str, Any]) -> dict[str, Any]:
     max_turns = int(body.get("max_turns", 20) or 20)
     enable_tools = bool(body.get("enable_tools", True))
     requested_tools = set(body.get("allowed_tools", list(_ALL_TOOLS)))
-    unknown_tools = sorted(requested_tools - _ALL_TOOLS)
+    allowed_tools, unknown_tools = sanitize_requested_tools(requested_tools, _ALL_TOOLS)
     if unknown_tools:
         logger.warning("Ignoring unknown allowed_tools entries: %s", unknown_tools)
-    allowed_tools = requested_tools & _ALL_TOOLS
     if not allowed_tools:
         allowed_tools = set(_ALL_TOOLS)
     skill_dirs_raw = body.get("skill_dirs", [])

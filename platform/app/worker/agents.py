@@ -9,6 +9,12 @@ from typing import Any
 
 from app.config import settings
 from app.worker.prompts import SYSTEM_PROMPTS
+from sandbox.tool_policy import (
+    DEFAULT_FALLBACK_CORE_TOOLS,
+    DEFAULT_FALLBACK_TOOL_ARGUMENT_HINTS,
+    ToolExecutionPolicyMixin,
+    discover_tool_catalog,
+)
 
 try:
     from skillkit import AgentRunner
@@ -39,14 +45,6 @@ ROLE_TOOLS: dict[str, set[str]] = {
     "review":       {"read", "execute", "skill"},
     "smoke":        {"read", "execute", "skill"},
     "doc":          {"read", "write", "skill"},
-}
-_FALLBACK_CORE_TOOLS = {"read", "write", "execute", "execute_script", "skill"}
-_FALLBACK_TOOL_ARGUMENT_HINTS: dict[str, str] = {
-    "execute": '{"command":"<shell command>","cwd":"<optional path>"}',
-    "execute_script": '{"script":"<shell script>","cwd":"<optional path>"}',
-    "read": '{"path":"<file path>"}',
-    "write": '{"path":"<file path>","content":"<file content>"}',
-    "skill": '{"name":"<skill name>","arguments":"<optional string>"}',
 }
 _ALL_TOOLS: set[str] = set()
 _TOOL_ARGUMENT_HINTS: dict[str, str] = {}
@@ -92,69 +90,28 @@ def _get_skill_dirs(role: str, extra_skill_dirs: list[str] | None = None) -> lis
     return deduped
 
 
-def _discover_tool_schemas() -> dict[str, dict[str, Any]]:
-    """Discover current tool schemas from SkillKit runner.get_tools()."""
+def _create_tool_probe_runner():
     if not SKILLKIT_AVAILABLE:
-        return {}
-    try:
-        probe = AgentRunner.create(
-            skill_dirs=_get_skill_dirs("coding"),
-            system_prompt=SYSTEM_PROMPTS.get("coding", ""),
-            enable_tools=True,
-            load_context_files=False,
-            max_turns=1,
-        )
-        schemas: dict[str, dict[str, Any]] = {}
-        for tool in probe.get_tools():
-            if not isinstance(tool, dict):
-                continue
-            function_info = tool.get("function")
-            if not isinstance(function_info, dict):
-                continue
-            name = function_info.get("name")
-            parameters = function_info.get("parameters")
-            if isinstance(name, str) and isinstance(parameters, dict):
-                schemas[name] = parameters
-        return schemas
-    except Exception:
-        logger.warning("Failed to discover tool schemas from SkillKit; fallback to defaults", exc_info=True)
-        return {}
-
-
-def _schema_to_hint(parameters: dict[str, Any]) -> str:
-    properties = parameters.get("properties")
-    if not isinstance(properties, dict) or not properties:
-        return '{"...":"..."}'
-    example: dict[str, Any] = {}
-    for key, spec in properties.items():
-        if not isinstance(key, str):
-            continue
-        type_name = spec.get("type") if isinstance(spec, dict) else None
-        if type_name == "string":
-            example[key] = f"<{key}>"
-        elif type_name == "integer":
-            example[key] = 0
-        elif type_name == "number":
-            example[key] = 0
-        elif type_name == "boolean":
-            example[key] = False
-        elif type_name == "array":
-            example[key] = []
-        elif type_name == "object":
-            example[key] = {}
-        else:
-            example[key] = "<value>"
-    return json.dumps(example, ensure_ascii=False, separators=(",", ":"))
+        raise RuntimeError("SkillKit unavailable")
+    return AgentRunner.create(
+        skill_dirs=_get_skill_dirs("coding"),
+        system_prompt=SYSTEM_PROMPTS.get("coding", ""),
+        enable_tools=True,
+        load_context_files=False,
+        max_turns=1,
+    )
 
 
 def _refresh_tool_catalog() -> None:
     """Refresh dynamic tool catalog and argument hints from SkillKit source of truth."""
     global _ALL_TOOLS, _TOOL_ARGUMENT_HINTS
-    schemas = _discover_tool_schemas()
-    _ALL_TOOLS = set(_FALLBACK_CORE_TOOLS) | set(schemas.keys())
-    _TOOL_ARGUMENT_HINTS = dict(_FALLBACK_TOOL_ARGUMENT_HINTS)
-    for name, parameters in schemas.items():
-        _TOOL_ARGUMENT_HINTS[name] = _schema_to_hint(parameters)
+    _ALL_TOOLS, _TOOL_ARGUMENT_HINTS = discover_tool_catalog(
+        create_probe_runner=_create_tool_probe_runner,
+        fallback_core_tools=DEFAULT_FALLBACK_CORE_TOOLS,
+        fallback_hints=DEFAULT_FALLBACK_TOOL_ARGUMENT_HINTS,
+        logger=logger,
+        warning_message="Failed to discover tool schemas from SkillKit; fallback to defaults",
+    )
 
 
 def get_all_tools() -> set[str]:
@@ -210,33 +167,6 @@ def _resolve_max_turns(role: str, override: int | None) -> int:
 def _normalize_prompt_append(value: str | None) -> str | None:
     text = (value or "").strip()
     return text or None
-
-
-def _build_invalid_tool_args_error(
-    *,
-    tool_name: str,
-    raw_args: Any,
-    detail: str,
-    received_type: str | None = None,
-) -> str:
-    expected = _TOOL_ARGUMENT_HINTS.get(tool_name, '{"...":"..."}')
-    if isinstance(raw_args, str):
-        preview = raw_args
-    else:
-        preview = json.dumps(raw_args, ensure_ascii=False, default=str)
-    preview = preview.replace("\n", "\\n")
-    if len(preview) > 160:
-        preview = f"{preview[:160]}..."
-    type_hint = f"Received type: {received_type}. " if received_type else ""
-    return (
-        f"Error: Invalid arguments for tool {tool_name}. "
-        f"{detail}. "
-        f"{type_hint}"
-        f"Expected format: {expected}. "
-        "Please resend this tool call with a valid JSON object in function.arguments. "
-        "If arguments were truncated, split content and retry. "
-        f"arguments_preview={preview}"
-    )
 
 
 def _runner_signature(runner: "SandboxedAgentRunner") -> tuple | None:
@@ -305,7 +235,7 @@ def _create_or_refresh_runner(
 _BaseRunner = AgentRunner if SKILLKIT_AVAILABLE else object
 
 
-class SandboxedAgentRunner(_BaseRunner):  # type: ignore[misc]
+class SandboxedAgentRunner(ToolExecutionPolicyMixin, _BaseRunner):  # type: ignore[misc]
     """AgentRunner with per-task working directory and role-based tool filtering."""
 
     def __init__(self, *args, default_cwd: str | None = None,
@@ -313,6 +243,7 @@ class SandboxedAgentRunner(_BaseRunner):  # type: ignore[misc]
         super().__init__(*args, **kwargs)
         self.default_cwd = default_cwd
         self.allowed_tools = allowed_tools or _ALL_TOOLS
+        self._tool_argument_hints = _TOOL_ARGUMENT_HINTS
 
     def _resolve_workspace_path(self, path: str) -> tuple[str, str | None]:
         """Resolve a possibly-relative path into task workspace safely."""
@@ -349,61 +280,40 @@ class SandboxedAgentRunner(_BaseRunner):  # type: ignore[misc]
                  if t["function"]["name"] in self.allowed_tools]
         return tools
 
-    async def _execute_tool(self, tool_call, on_output=None):
-        name = tool_call.get("name", "")
-        args: dict[str, Any] = {}
-        raw_args = tool_call.get("arguments", "{}")
-        if isinstance(raw_args, dict):
-            parsed_args: Any = raw_args
-        elif isinstance(raw_args, str):
-            try:
-                parsed_args = json.loads(raw_args or "{}")
-            except json.JSONDecodeError as exc:
-                return _build_invalid_tool_args_error(
-                    tool_name=name,
-                    raw_args=raw_args,
-                    detail=(
-                        "JSON decode error: "
-                        f"{exc.msg} at line {exc.lineno}, column {exc.colno}"
-                    ),
-                )
-        else:
-            parsed_args = raw_args
-        if not isinstance(parsed_args, dict):
-            return _build_invalid_tool_args_error(
-                tool_name=name,
-                raw_args=raw_args,
-                detail="Arguments must decode to a JSON object",
-                received_type=type(parsed_args).__name__,
-            )
-        args = parsed_args
-
-        # Inject default cwd for execution tools
-        if self.default_cwd and name in ("execute", "execute_script"):
-            if not args.get("cwd"):
-                args["cwd"] = self.default_cwd
-        tool_call = {**tool_call, "arguments": json.dumps(args, ensure_ascii=False)}
-
-        # Resolve read/write relative paths into task workspace.
-        if self.default_cwd and name in ("read", "write"):
-            path = str(args.get("path") or "")
-            resolved_path, error = self._resolve_workspace_path(path)
-            if error:
-                return error
-            if resolved_path != path:
-                args["path"] = resolved_path
-                tool_call = {**tool_call, "arguments": json.dumps(args)}
-
-            # Doc role has no `execute`; support directory probing via `read`.
-            if name == "read":
-                target = Path(resolved_path)
-                if target.exists() and target.is_dir():
-                    return self._format_directory_listing(target, path or resolved_path)
-
-        # Block tools not in whitelist (belt-and-suspenders)
-        if name not in self.allowed_tools:
-            return f"Error: {name} is not allowed for this role"
+    async def _execute_tool_base(self, tool_call, on_output=None) -> str:
         return await super()._execute_tool(tool_call, on_output)
+
+    async def _execute_tool(self, tool_call, on_output=None):
+        return await self._execute_tool_with_policy(tool_call, on_output=on_output)
+
+    def _preprocess_validated_tool_call(
+        self,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        tool_call: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], str | None, str | None]:
+        if not self.default_cwd or tool_name not in ("read", "write"):
+            return tool_call, args, None, None
+
+        path = str(args.get("path") or "")
+        resolved_path, error = self._resolve_workspace_path(path)
+        if error:
+            return tool_call, args, error, None
+
+        if resolved_path != path:
+            args = dict(args)
+            args["path"] = resolved_path
+            tool_call = {**tool_call, "arguments": json.dumps(args, ensure_ascii=False)}
+
+        # Doc role has no `execute`; support directory probing via `read`.
+        if tool_name == "read" and resolved_path:
+            target = Path(resolved_path)
+            if target.exists() and target.is_dir():
+                listing = self._format_directory_listing(target, path or resolved_path)
+                return tool_call, args, None, listing
+
+        return tool_call, args, None, None
 
 
 def resolve_model_for_role(role: str, stage_model: str | None = None) -> str | None:
