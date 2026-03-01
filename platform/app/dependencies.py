@@ -12,6 +12,7 @@ from app.services.skill_service import SkillService
 from app.services.task_service import TaskService
 from app.services.task_log_service import TaskLogService
 from app.services.template_service import TemplateService
+from app.services.trigger_service import TriggerService
 
 
 async def get_agent_service(
@@ -72,3 +73,9 @@ async def get_task_log_service(
     session: AsyncSession = Depends(get_db),
 ) -> TaskLogService:
     return TaskLogService(session)
+
+
+async def get_trigger_service(
+    session: AsyncSession = Depends(get_db),
+) -> TriggerService:
+    return TriggerService(session)

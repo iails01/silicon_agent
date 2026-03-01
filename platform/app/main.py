@@ -7,7 +7,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_v1_router
-from app.api.webhooks import jira, gitlab
+from app.api.webhooks import github, gitlab, jira
 from app.config import settings
 from app.db.init_db import init_db
 from app.db.session import async_session_factory, engine
@@ -120,6 +120,7 @@ app.add_middleware(
 app.include_router(api_v1_router)
 app.include_router(jira.router)
 app.include_router(gitlab.router)
+app.include_router(github.router)
 
 
 @app.get("/health")

@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     # Webhook secrets (empty = skip verification)
     JIRA_WEBHOOK_SECRET: str = ""
     GITLAB_WEBHOOK_SECRET: str = ""
+    GITHUB_WEBHOOK_SECRET: str = ""
 
     # External notification (webhook URL for task events)
     NOTIFY_WEBHOOK_URL: str = ""
