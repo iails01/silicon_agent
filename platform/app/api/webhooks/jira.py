@@ -63,7 +63,7 @@ def _normalize_jira_payload(data: dict) -> dict:
 @router.post("")
 async def jira_webhook(request: Request, session: AsyncSession = Depends(get_db)):
     body = await request.body()
-    signature = request.headers.get("X-Hub-Signature")
+    signature = request.headers.get("X-Atlassian-Signature")
 
     if not _verify_jira_signature(body, signature):
         logger.warning("Jira webhook signature verification failed")

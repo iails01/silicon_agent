@@ -62,7 +62,7 @@ class TriggerRuleResponse(BaseModel):
     title_template: str
     desc_template: Optional[str]
     dedup_key_template: Optional[str]
-    dedup_window_hours: str
+    dedup_window_hours: int
     cron_expr: Optional[str]
     last_triggered_at: Optional[datetime]
     enabled: bool

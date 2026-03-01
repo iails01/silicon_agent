@@ -29,12 +29,12 @@ class TriggerService:
         Returns:
             创建的 task_id，或 None（未触发）。
         """
-        # 查找匹配的启用规则
+        # 查找匹配的启用规则，按创建时间升序确保「首条命中」顺序确定
         result = await self.session.execute(
             select(TriggerRuleModel).where(
                 TriggerRuleModel.source == source,
                 TriggerRuleModel.enabled.is_(True),
-            )
+            ).order_by(TriggerRuleModel.created_at)
         )
         rules = result.scalars().all()
 
@@ -49,6 +49,13 @@ class TriggerService:
             logger.info("触发器：无匹配规则 source=%s event=%s", source, event_type)
             return None
 
+        if len(matched_rules) > 1:
+            logger.debug(
+                "触发器：%d 条规则匹配 source=%s event=%s，采用首条命中策略",
+                len(matched_rules), source, event_type,
+            )
+
+        # 首条命中策略：依次评估规则，第一条通过过滤+去重检查的规则触发任务，后续规则不再评估
         for rule in matched_rules:
             # 1. 过滤器检查
             if not _passes_filters(rule.filters or {}, payload):
@@ -63,7 +70,7 @@ class TriggerService:
                 logger.info("触发器：去重跳过 rule=%s dedup_key=%s", rule.name, dedup_key)
                 continue
 
-            # 3. 创建任务
+            # 3. 创建任务（首条命中，立即返回，不继续评估后续规则）
             title = _render_template(rule.title_template, payload)
             description = _render_template(rule.desc_template or "", payload) or None
 
@@ -86,10 +93,7 @@ class TriggerService:
 
     async def _is_duplicate(self, rule: TriggerRuleModel, dedup_key: str) -> bool:
         """检查去重窗口内是否已有相同 dedup_key 的触发记录。"""
-        try:
-            window_hours = int(rule.dedup_window_hours)
-        except (ValueError, TypeError):
-            window_hours = 24
+        window_hours = rule.dedup_window_hours or 24
         cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
 
         result = await self.session.execute(

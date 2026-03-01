@@ -28,7 +28,6 @@ async def create_rule(
     service: TriggerService = Depends(get_trigger_service),
 ):
     data = request.model_dump()
-    data["dedup_window_hours"] = str(data["dedup_window_hours"])
     rule = await service.create_rule(data)
     return TriggerRuleResponse.model_validate(rule)
 
@@ -60,8 +59,6 @@ async def update_rule(
     service: TriggerService = Depends(get_trigger_service),
 ):
     data = {k: v for k, v in request.model_dump().items() if v is not None}
-    if "dedup_window_hours" in data:
-        data["dedup_window_hours"] = str(data["dedup_window_hours"])
     rule = await service.update_rule(rule_id, data)
     if rule is None:
         raise HTTPException(status_code=404, detail="触发规则不存在")

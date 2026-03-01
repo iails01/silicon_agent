@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -43,7 +43,7 @@ class TriggerRuleModel(Base):
     dedup_key_template: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     # 去重时间窗口（小时），默认 24h
     dedup_window_hours: Mapped[int] = mapped_column(
-        String(10), nullable=False, default="24"
+        Integer, nullable=False, server_default="24"
     )
     # Cron 表达式（仅 source="cron" 时使用），标准 5 段格式，如 "0 9 * * 1-5"
     cron_expr: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
