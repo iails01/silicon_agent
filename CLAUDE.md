@@ -133,3 +133,166 @@ All settings load from `.env` via Pydantic BaseSettings. Critical ones:
 - Ruff lint: line length 100, target Python 3.11
 - TypeScript strict mode enabled
 - API base path: `/api/v1/`
+
+## Development Tricks & Patterns
+
+### Adding a New Model Field (Auto-Migration)
+
+No Alembic needed. Add the column to the SQLAlchemy model with a default value — `init_db.py:_add_missing_columns()` auto-detects and runs `ALTER TABLE` + backfill on startup.
+
+```python
+# 1. Add to model (platform/app/models/task.py)
+north_star: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+# 2. That's it. On next startup the column is added automatically.
+# For NOT NULL columns, provide a server_default:
+retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+```
+
+Gotcha: `server_default` must be a string literal (SQL value), `default` is Python-level for backfill.
+
+---
+
+### Adding a New WebSocket Event (End-to-End)
+
+**Step 1** — Define constant in `platform/app/websocket/events.py`:
+```python
+MY_NEW_EVENT = "my:new_event"
+```
+
+**Step 2** — Add mapping in `platform/app/websocket/manager.py` (`_EVENT_TYPE_MAP`):
+```python
+"my:new_event": "activity",   # or a new frontend type
+```
+
+**Step 3** — Broadcast from backend (use `_safe_broadcast` to swallow errors):
+```python
+from app.websocket.events import MY_NEW_EVENT
+await _safe_broadcast(MY_NEW_EVENT, {"task_id": task.id, "detail": "..."})
+```
+
+**Step 4** — Handle in frontend `web/src/hooks/useWebSocket.ts` (`handleMessage` switch):
+```typescript
+case 'activity': {   // matches the mapped type
+  addActivity(msg.payload as WSActivityPayload);
+  break;
+}
+```
+
+For a new frontend type, also add the case to the switch and a new Zustand/React Query action.
+
+---
+
+### Adding a New API Endpoint
+
+Follow the existing three-layer pattern: route → service → dependency injection.
+
+```python
+# 1. Route (platform/app/api/v1/tasks.py)
+@router.post("/{task_id}/north-star", response_model=TaskDetailResponse)
+async def set_north_star(
+    task_id: str,
+    request: NorthStarRequest,
+    service: TaskService = Depends(get_task_service),
+):
+    return await service.set_north_star(task_id, request)
+
+# 2. Service method (platform/app/services/task_service.py)
+async def set_north_star(self, task_id: str, request: NorthStarRequest) -> TaskDetailResponse:
+    result = await self.session.execute(
+        select(TaskModel).where(TaskModel.id == task_id).options(selectinload(TaskModel.stages))
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.north_star = request.north_star
+    await self.session.commit()
+    return self._task_to_response(task)
+```
+
+Always use `selectinload()` for relationships — lazy loading breaks with async sessions.
+
+---
+
+### Writing Tests (Fixtures & Mocking)
+
+**Fixture pattern** — Use `tt-` prefix for seeded IDs, clean up in child-before-parent order:
+
+```python
+@pytest_asyncio.fixture
+async def seed_my_data():
+    async with async_session_factory() as session:
+        obj = MyModel(id="tt-my-1", name="test")
+        session.add(obj)
+        await session.commit()
+    yield "tt-my-1"
+    async with async_session_factory() as session:
+        result = await session.execute(select(MyModel).where(MyModel.id == "tt-my-1"))
+        obj = result.scalar_one_or_none()
+        if obj:
+            await session.delete(obj)
+        await session.commit()
+```
+
+**Mocking agent runner in executor tests** — monkeypatch module-level functions, use `SimpleNamespace` for lightweight fakes:
+
+```python
+@pytest.mark.asyncio
+async def test_my_stage(monkeypatch):
+    fake_runner = SimpleNamespace(
+        config=SimpleNamespace(model='test-model'),
+        cumulative_usage=SimpleNamespace(total_tokens=100),
+        default_cwd='/tmp/ws',
+        reset_usage=lambda: None,
+        chat=AsyncMock(return_value=SimpleNamespace(text_content='output')),
+        events=SimpleNamespace(on=lambda *a, **kw: None),
+    )
+    monkeypatch.setattr(executor, 'get_agent', lambda *a, **kw: fake_runner)
+    monkeypatch.setattr(executor, '_safe_broadcast', AsyncMock())
+    monkeypatch.setattr(executor, 'build_user_prompt', lambda _ctx: 'prompt')
+    session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    # ... build task/stage SimpleNamespace objects and call execute_stage(...)
+```
+
+---
+
+### Frontend: React Query + Zustand Pattern
+
+- **React Query** owns server data (tasks, templates, KPIs) — always invalidate via `queryClient.invalidateQueries`
+- **Zustand** owns ephemeral real-time state (agent status, activity feed, notifications)
+- **WebSocket** is the bridge: `task_update` events trigger React Query invalidation; `agent_status` events update Zustand directly
+
+```typescript
+// Fetch with React Query
+const { data: tasks } = useQuery({
+  queryKey: ['tasks', params],
+  queryFn: () => listTasks(params),
+});
+
+// Mutate and invalidate
+const createMutation = useMutation({
+  mutationFn: createTask,
+  onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }),
+});
+
+// Read Zustand agent state (real-time, no server fetch needed)
+const agents = useAgentStore((s) => s.agents);
+```
+
+Use `refetchInterval: 3000` on `useTask` only when `task.status === 'running'` — avoid polling otherwise.
+
+---
+
+### Development Session Checklist
+
+Before starting any coding session on this project:
+
+```bash
+cd platform && pytest tests/ -v   # Establish baseline — all tests must pass first
+```
+
+When implementing a new feature:
+1. Write the test first (confirm it fails)
+2. Implement to make the test pass
+3. Run full suite to confirm no regressions
+4. If you discovered a new gotcha, add it to this section before closing the session
