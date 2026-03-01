@@ -27,6 +27,7 @@ from app.config import settings
 from app.integration.skillkit_env import build_sandbox_llm_env
 
 logger = logging.getLogger(__name__)
+_MODEL_API_LOG_MOUNT_DIR = "/model_api_logs"
 
 # Semaphore to limit concurrent containers
 _concurrency_sem: Optional[asyncio.Semaphore] = None
@@ -156,6 +157,7 @@ class SandboxManager:
             container_name=container_name,
             image=resolved_image,
             workspace=workspace,
+            task_id=task_id,
         )
 
         logger.info("Creating sandbox container: %s (image=%s)", container_name, resolved_image)
@@ -398,6 +400,7 @@ class SandboxManager:
         container_name: str,
         image: str,
         workspace: str,
+        task_id: str,
     ) -> list[str]:
         """Build the docker run command with security constraints."""
         parts = [
@@ -420,6 +423,26 @@ class SandboxManager:
             "--mount",
             f"type=bind,src={workspace},dst=/workspace",
         ]
+        capture_model_api_raw = bool(settings.SANDBOX_DUMP_MODEL_API_RESPONSE)
+        container_raw_log_path: str | None = None
+        if capture_model_api_raw:
+            host_log_dir = Path(settings.SANDBOX_MODEL_API_RAW_LOG_HOST_DIR).expanduser()
+            try:
+                host_log_dir.mkdir(parents=True, exist_ok=True)
+                parts.extend(
+                    [
+                        "--mount",
+                        f"type=bind,src={host_log_dir},dst={_MODEL_API_LOG_MOUNT_DIR}",
+                    ]
+                )
+                container_raw_log_path = f"{_MODEL_API_LOG_MOUNT_DIR}/{task_id}.jsonl"
+            except Exception:
+                logger.warning(
+                    "Failed to prepare model API raw log mount directory: %s",
+                    host_log_dir,
+                    exc_info=True,
+                )
+                capture_model_api_raw = False
 
         if settings.SANDBOX_READONLY_ROOT:
             parts.append("--read-only")
@@ -438,6 +461,14 @@ class SandboxManager:
         )
         for key, value in llm_env.items():
             parts.extend(["-e", f"{key}={value}"])
+        parts.extend(
+            [
+                "-e",
+                f"SANDBOX_DUMP_MODEL_API_RESPONSE={'true' if capture_model_api_raw else 'false'}",
+            ]
+        )
+        if capture_model_api_raw and container_raw_log_path:
+            parts.extend(["-e", f"SANDBOX_MODEL_API_RAW_LOG_PATH={container_raw_log_path}"])
 
         parts.append(image)
 
