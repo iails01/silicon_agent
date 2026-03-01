@@ -1,7 +1,6 @@
 """Tests for cron trigger: scheduler logic, TriggerService, and Triggers API."""
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,7 +9,6 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from app.db.session import async_session_factory
-from app.models.task import TaskModel
 from app.models.template import TaskTemplateModel
 from app.models.trigger import TriggerEventModel, TriggerRuleModel
 from app.worker.scheduler import _is_due, validate_cron_expr
