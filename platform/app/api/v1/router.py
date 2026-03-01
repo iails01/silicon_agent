@@ -12,6 +12,7 @@ from app.api.v1 import (
     task_logs,
     tasks,
     templates,
+    triggers,
 )
 
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -27,3 +28,4 @@ api_v1_router.include_router(circuit_breaker.router)
 api_v1_router.include_router(templates.router)
 api_v1_router.include_router(projects.router)
 api_v1_router.include_router(task_logs.router)
+api_v1_router.include_router(triggers.router)

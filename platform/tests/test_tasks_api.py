@@ -1,5 +1,6 @@
 """Integration tests for the Tasks API endpoints."""
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -574,3 +575,215 @@ async def test_retry_batch_mixed_results(client, seed_retry_enhanced_tasks):
     assert stages["tt-retry-enhanced-stage-test"]["status"] == "failed"
     assert by_id["tt-retry-enhanced-running"]["success"] is False
     assert by_id["tt-retry-enhanced-missing"]["success"] is False
+
+
+# ── New: decompose_prd ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_decompose_prd_returns_tasks(client, monkeypatch):
+    """POST /tasks/decompose with mocked LLM returns parsed task list."""
+    import app.services.task_service as task_service_mod
+    from app.integration.llm_client import LLMResponse
+
+    fake_response = LLMResponse(
+        content='{"tasks": [{"title": "Setup DB", "description": "Init schema", "priority": "high"}], '
+                '"summary": "1 task identified"}',
+        input_tokens=10,
+        output_tokens=20,
+        total_tokens=30,
+        model="test-model",
+    )
+
+    fake_client = type("FakeLLM", (), {"chat": AsyncMock(return_value=fake_response)})()
+    monkeypatch.setattr(task_service_mod, "get_llm_client" if hasattr(task_service_mod, "get_llm_client") else "_", lambda: fake_client, raising=False)
+
+    # Patch at the import level used inside decompose_prd
+    import app.integration.llm_client as llm_mod
+    original = llm_mod.get_llm_client
+    llm_mod.get_llm_client = lambda: fake_client
+
+    try:
+        resp = await client.post("/api/v1/tasks/decompose", json={
+            "prd_text": "Build a login feature with JWT auth",
+        })
+    finally:
+        llm_mod.get_llm_client = original
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["tasks"]) == 1
+    assert data["tasks"][0]["title"] == "Setup DB"
+    assert data["tasks"][0]["priority"] == "high"
+    assert data["summary"] == "1 task identified"
+    assert data["tokens_used"] == 30
+
+
+@pytest.mark.asyncio
+async def test_decompose_prd_handles_invalid_json_from_llm(client):
+    """POST /tasks/decompose when LLM returns non-JSON → returns empty tasks with error summary."""
+    import app.integration.llm_client as llm_mod
+    from app.integration.llm_client import LLMResponse
+
+    fake_response = LLMResponse(
+        content="Sorry, I cannot help with that.",
+        input_tokens=5,
+        output_tokens=10,
+        total_tokens=15,
+        model="test-model",
+    )
+    fake_client = type("FakeLLM", (), {"chat": AsyncMock(return_value=fake_response)})()
+    original = llm_mod.get_llm_client
+    llm_mod.get_llm_client = lambda: fake_client
+
+    try:
+        resp = await client.post("/api/v1/tasks/decompose", json={
+            "prd_text": "Some PRD text",
+        })
+    finally:
+        llm_mod.get_llm_client = original
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["tasks"] == []
+    assert "错误" in data["summary"] or "error" in data["summary"].lower() or "格式" in data["summary"]
+
+
+# ── New: retry failed task ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_task_resets_to_pending(client):
+    """POST /tasks/{id}/retry on a failed task resets it to pending."""
+    async with async_session_factory() as session:
+        task = TaskModel(id="tt-retry-failed-1", title="Failed Task", status="failed")
+        session.add(task)
+        stage = TaskStageModel(
+            id="tt-retry-failed-stage-1",
+            task_id="tt-retry-failed-1",
+            stage_name="coding",
+            agent_role="coding",
+            status="failed",
+            retry_count=0,
+            error_message="build error",
+        )
+        session.add(stage)
+        await session.commit()
+
+    resp = await client.post("/api/v1/tasks/tt-retry-failed-1/retry")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "pending"
+
+    coding_stage = next((s for s in data["stages"] if s["id"] == "tt-retry-failed-stage-1"), None)
+    assert coding_stage is not None
+    assert coding_stage["status"] == "pending"
+    assert coding_stage["retry_count"] == 1
+    assert coding_stage["error_message"] is None
+
+    # Cleanup
+    async with async_session_factory() as session:
+        for cls, obj_id in [(TaskStageModel, "tt-retry-failed-stage-1"), (TaskModel, "tt-retry-failed-1")]:
+            obj = await session.get(cls, obj_id)
+            if obj:
+                await session.delete(obj)
+        await session.commit()
+
+
+# ── New: _reset_stage_for_retry via retry-from-stage ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reset_stage_for_retry_clears_fields(client, seed_retry_enhanced_tasks):
+    """retry-from-stage triggers _reset_stage_for_retry: output cleared, retry_count incremented."""
+    resp = await client.post(
+        "/api/v1/tasks/tt-retry-enhanced-failed/retry-from-stage",
+        json={"stage_id": "tt-retry-enhanced-stage-coding"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    coding = next(s for s in data["stages"] if s["id"] == "tt-retry-enhanced-stage-coding")
+    # Fields that _reset_stage_for_retry clears
+    assert coding["status"] == "pending"
+    assert coding["error_message"] is None
+    assert coding["output_summary"] is None
+    assert coding["retry_count"] == 2  # was 1, incremented
+
+
+# ── New: batch retry edge cases ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_retry_batch_empty_list(client):
+    """Batch retry with empty task_ids list returns empty result without error."""
+    resp = await client.post("/api/v1/tasks/retry-batch", json={"task_ids": []})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 0
+    assert data["succeeded"] == 0
+    assert data["failed"] == 0
+    assert data["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_retry_batch_all_nonexistent(client):
+    """Batch retry where all task_ids don't exist → all failed."""
+    resp = await client.post("/api/v1/tasks/retry-batch", json={
+        "task_ids": ["nonexistent-1", "nonexistent-2"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 2
+    assert data["succeeded"] == 0
+    assert data["failed"] == 2
+    for item in data["items"]:
+        assert item["success"] is False
+        assert "not found" in item["reason"].lower()
+
+
+# ── New: _recalculate_task_usage via retry ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_recalculate_task_usage_after_retry(client):
+    """After retry, task.total_tokens == sum of only completed stages."""
+    task_id = "tt-usage-task-1"
+    async with async_session_factory() as session:
+        session.add(TaskModel(
+            id=task_id, title="Usage Task", status="failed",
+            total_tokens=200, total_cost_rmb=0.2,
+        ))
+        session.add_all([
+            TaskStageModel(
+                id="tt-usage-stage-done",
+                task_id=task_id, stage_name="parse", agent_role="orchestrator",
+                status="completed", tokens_used=80,
+            ),
+            TaskStageModel(
+                id="tt-usage-stage-fail",
+                task_id=task_id, stage_name="coding", agent_role="coding",
+                status="failed", tokens_used=120, retry_count=0,
+                error_message="compile error",
+            ),
+        ])
+        await session.commit()
+
+    resp = await client.post(f"/api/v1/tasks/{task_id}/retry")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # After retry: failed stage tokens_used is reset to 0; only completed stage counts
+    assert data["total_tokens"] == 80
+
+    # Cleanup
+    async with async_session_factory() as session:
+        for cls, oid in [
+            (TaskStageModel, "tt-usage-stage-done"),
+            (TaskStageModel, "tt-usage-stage-fail"),
+            (TaskModel, task_id),
+        ]:
+            obj = await session.get(cls, oid)
+            if obj:
+                await session.delete(obj)
+        await session.commit()

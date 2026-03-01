@@ -139,6 +139,9 @@ async def start_worker() -> None:
     _task = asyncio.create_task(_poll_loop())
     logger.info("Worker started (poll_interval=%.1fs)", settings.WORKER_POLL_INTERVAL)
 
+    from app.worker.scheduler import start_scheduler
+    await start_scheduler()
+
 
 async def _recover_stale_tasks() -> None:
     """Reset tasks stuck in 'running' or 'claimed' back to 'pending' on startup."""
@@ -203,6 +206,9 @@ async def stop_worker() -> None:
 
     from app.worker.agents import close_all_agents
     close_all_agents()
+
+    from app.worker.scheduler import stop_scheduler
+    await stop_scheduler()
 
     logger.info("Worker stopped")
 
