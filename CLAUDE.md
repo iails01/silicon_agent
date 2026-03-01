@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cd platform
 pip install -e ".[dev]"                          # Install dependencies
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload  # Dev server
-pytest tests/ -v                                 # Run all tests (113 tests)
+pytest tests/ -v                                 # Run all tests (471 tests)
 pytest tests/test_tasks_api.py -v                # Run single test file
 pytest tests/test_tasks_api.py::test_create_task -v  # Run single test
 ruff check app/ tests/                           # Lint
@@ -105,13 +105,85 @@ async def list_tasks(service: TaskService = Depends(get_task_service)):
 
 ## Testing
 
-Tests use in-memory SQLite with patched settings (`WORKER_ENABLED=False`, `JWT_ENABLED=False`). Fixtures in `conftest.py` create tables once per session and provide a fresh `AsyncClient` per test function.
+### Infrastructure
+
+Tests use **file-based SQLite with WAL mode** (not in-memory) to eliminate reader-writer blocking when worker and test polling run concurrently. Key settings in `conftest.py`:
+
+- `WORKER_ENABLED=False`, `JWT_ENABLED=False`, `SKILLKIT_ENABLED=False`
+- `MEMORY_ENABLED=True` — but `_MEMORY_ROOT` is redirected to a `tempfile.mkdtemp()` dir so engine tests never write to `platform/memory/`
+- `NullPool` — no connection reuse across tests
+- WAL mode + `busy_timeout=30000` — concurrent reads/writes don't deadlock
 
 ```python
 @pytest.mark.asyncio
 async def test_example(client):  # client is httpx.AsyncClient against ASGI app
     resp = await client.get("/api/v1/tasks")
     assert resp.status_code == 200
+```
+
+### Coverage Requirements
+
+| Scope | Threshold | Current |
+|-------|-----------|---------|
+| Overall (`app/`) | **70%** (CI enforced via `--cov-fail-under=70`) | ~73% |
+| `worker/engine.py` | **95%** | 95% |
+
+Run with coverage locally:
+```bash
+cd platform
+pytest tests/ -v --cov=app --cov-report=term-missing
+```
+
+CI posts a coverage comment on every PR showing per-file missing lines (green ≥ 80%, orange ≥ 60%).
+
+### Unit Test Patterns for Worker/Engine
+
+Engine internals cannot be tested through the HTTP API. Use `monkeypatch` + `SimpleNamespace` fakes:
+
+**Mocking engine-level functions** — patch at the `engine` module level:
+
+```python
+from app.worker import engine
+from unittest.mock import AsyncMock
+from types import SimpleNamespace
+
+@pytest.mark.asyncio
+async def test_my_engine_path(monkeypatch):
+    monkeypatch.setattr(engine, "_safe_broadcast", AsyncMock())
+    monkeypatch.setattr(engine, "_fail_task", AsyncMock())
+    monkeypatch.setattr(engine, "_complete_task", AsyncMock())
+
+    task = SimpleNamespace(id="t-1", title="T", status="running",
+                           project_id="p-1", project=None, template=None,
+                           stages=[], target_branch=None, ...)
+    session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    await engine._process_task(session, task)
+```
+
+**Mocking `sys.modules` for lazily-imported modules** — use `monkeypatch.setitem` (NOT direct assignment), so pytest restores the original on teardown:
+
+```python
+import sys
+
+monkeypatch.setitem(sys.modules, "app.worker.graph",
+    SimpleNamespace(StageGraph=FakeStageGraph))
+# No need for try/finally — monkeypatch handles cleanup
+```
+
+Direct `sys.modules["x"] = fake` + `sys.modules.pop("x")` in `finally` is **wrong**: `pop()` removes the entry entirely, so subsequent `patch("app.worker.x.attr")` calls reimport a fresh module object and patch the wrong copy.
+
+**Mocking agent runner in executor tests**:
+
+```python
+fake_runner = SimpleNamespace(
+    config=SimpleNamespace(model='test-model'),
+    cumulative_usage=SimpleNamespace(total_tokens=100),
+    default_cwd='/tmp/ws',
+    reset_usage=lambda: None,
+    chat=AsyncMock(return_value=SimpleNamespace(text_content='output')),
+    events=SimpleNamespace(on=lambda *a, **kw: None),
+)
+monkeypatch.setattr(executor, 'get_agent', lambda *a, **kw: fake_runner)
 ```
 
 ## Key Configuration (platform/app/config.py)
@@ -216,7 +288,7 @@ Always use `selectinload()` for relationships — lazy loading breaks with async
 
 ### Writing Tests (Fixtures & Mocking)
 
-**Fixture pattern** — Use `tt-` prefix for seeded IDs, clean up in child-before-parent order:
+**Fixture pattern** — Use `tt-` prefix for seeded IDs, clean up in child-before-parent order (DB tests); use `gf-` prefix for gate-feedback tests:
 
 ```python
 @pytest_asyncio.fixture
@@ -254,6 +326,11 @@ async def test_my_stage(monkeypatch):
     # ... build task/stage SimpleNamespace objects and call execute_stage(...)
 ```
 
+**Test isolation gotchas**:
+- Never use `lambda` as a named assignment (`f = lambda x: x`) — use `def`. Ruff E731 enforces this.
+- Never define two test functions with the same name in the same file. The second silently shadows the first and the first is never executed. Ruff F811 catches this.
+- `session.refresh` in gate polling loops is called once at gate creation and again in the polling loop — mock carefully (allow first call, raise/return on subsequent ones).
+
 ---
 
 ### Frontend: React Query + Zustand Pattern
@@ -288,11 +365,21 @@ Use `refetchInterval: 3000` on `useTask` only when `task.status === 'running'` �
 Before starting any coding session on this project:
 
 ```bash
-cd platform && pytest tests/ -v   # Establish baseline — all tests must pass first
+cd platform && pytest tests/ -v   # Establish baseline — all 471 tests must pass first
 ```
 
 When implementing a new feature:
 1. Write the test first (confirm it fails)
 2. Implement to make the test pass
 3. Run full suite to confirm no regressions
-4. If you discovered a new gotcha, add it to this section before closing the session
+4. Check coverage for any modified modules: `pytest tests/ --cov=app/worker/engine --cov-report=term-missing`
+5. If you discovered a new gotcha, add it to this section before closing the session
+
+**Coverage targets to maintain**:
+- `worker/engine.py` must stay ≥ 95%
+- Overall `app/` must stay ≥ 70% (CI blocks merge if below)
+
+**CI checks required before merge** (branch protection enforced):
+- `backend-lint` — ruff check on `app/` and `tests/`
+- `backend-test` — full pytest suite with `--cov-fail-under=70`
+- `frontend-check` — TypeScript type check + build
