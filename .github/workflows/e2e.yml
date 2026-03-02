@@ -13,6 +13,8 @@ jobs:
   e2e-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      COMPOSE_PROJECT_NAME: e2e
     defaults:
       run:
         working-directory: platform
@@ -29,8 +31,6 @@ jobs:
         run: |
           DOCKER_BUILDKIT=1 docker compose build --ssh default
           docker compose up -d --wait
-        env:
-          COMPOSE_PROJECT_NAME: e2e
 
       - name: Wait for app health
         run: |
