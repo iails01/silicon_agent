@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml ./
 
+# Add GitHub host key so git+ssh doesn't fail on host verification
+RUN mkdir -p /root/.ssh && ssh-keyscan github.com >> /root/.ssh/known_hosts
+
 # Use SSH mount to clone private dependencies during build
 RUN --mount=type=ssh pip install --no-cache-dir .
 
