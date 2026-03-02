@@ -17,6 +17,7 @@ RUN --mount=type=ssh pip install --no-cache-dir .
 
 # Copy application code
 COPY app/ ./app/
+COPY sandbox/ ./sandbox/
 COPY skills/ ./skills/
 COPY memory/ ./memory/
 
