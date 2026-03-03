@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from app.worker.sandbox_backend import (
     RoleResourceProfile,
     SandboxInfo,

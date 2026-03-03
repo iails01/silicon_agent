@@ -25,7 +25,6 @@ from app.integration.skillkit_env import build_sandbox_llm_env
 from app.worker.agents import get_all_tools
 from app.worker.sandbox_backend import (
     OnSandboxEvent,
-    RoleResourceProfile,
     SandboxCreateResult,
     SandboxInfo,
     SandboxResult,
