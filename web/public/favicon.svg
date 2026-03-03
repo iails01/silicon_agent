@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="chip" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#c7d2fe"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="4" y="4" width="120" height="120" rx="24" ry="24" fill="url(#bg)"/>
+
+  <!-- Circuit traces (pins) - top -->
+  <rect x="38" y="16" width="4" height="14" rx="2" fill="#a5b4fc"/>
+  <rect x="52" y="16" width="4" height="14" rx="2" fill="#a5b4fc"/>
+  <rect x="72" y="16" width="4" height="14" rx="2" fill="#a5b4fc"/>
+  <rect x="86" y="16" width="4" height="14" rx="2" fill="#a5b4fc"/>
+
+  <!-- Circuit traces (pins) - bottom -->
+  <rect x="38" y="98" width="4" height="14" rx="2" fill="#a5b4fc"/>
+  <rect x="52" y="98" width="4" height="14" rx="2" fill="#a5b4fc"/>
+  <rect x="72" y="98" width="4" height="14" rx="2" fill="#a5b4fc"/>
+  <rect x="86" y="98" width="4" height="14" rx="2" fill="#a5b4fc"/>
+
+  <!-- Circuit traces (pins) - left -->
+  <rect x="16" y="38" width="14" height="4" rx="2" fill="#a5b4fc"/>
+  <rect x="16" y="52" width="14" height="4" rx="2" fill="#a5b4fc"/>
+  <rect x="16" y="72" width="14" height="4" rx="2" fill="#a5b4fc"/>
+  <rect x="16" y="86" width="14" height="4" rx="2" fill="#a5b4fc"/>
+
+  <!-- Circuit traces (pins) - right -->
+  <rect x="98" y="38" width="14" height="4" rx="2" fill="#a5b4fc"/>
+  <rect x="98" y="52" width="14" height="4" rx="2" fill="#a5b4fc"/>
+  <rect x="98" y="72" width="14" height="4" rx="2" fill="#a5b4fc"/>
+  <rect x="98" y="86" width="14" height="4" rx="2" fill="#a5b4fc"/>
+
+  <!-- Chip body -->
+  <rect x="30" y="30" width="68" height="68" rx="8" ry="8" fill="url(#chip)" opacity="0.95"/>
+
+  <!-- "SA" text in chip center -->
+  <text x="64" y="73" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="32" fill="#4338ca" letter-spacing="-1">SA</text>
+</svg>
