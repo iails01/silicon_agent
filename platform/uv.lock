@@ -1635,7 +1635,7 @@ wheels = [
 [[package]]
 name = "skillkit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/sawzhang/agent-skills-engine.git?rev=master#06b72469e7781a32bb7add24e514e20803eb996d" }
+source = { git = "ssh://git@github.com/sawzhang/agent-skills-engine.git?rev=master#7ec2d07c19b8c18c479eb8c78af8afb76fabe04d" }
 dependencies = [
     { name = "markitdown", extra = ["pptx"] },
     { name = "openai" },

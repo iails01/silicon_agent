@@ -597,7 +597,7 @@ async def test_execute_stage_sandboxed_emits_standardized_pipeline_events(monkey
         tokens_used=0,
         output_summary=None,
     )
-    sandbox_info = SimpleNamespace(container_name='sbx-1')
+    sandbox_info = SimpleNamespace(container_name='sbx-1', host='127.0.0.1', port=9000)
 
     fake_pipeline = _FakePipeline()
     fake_sandbox_result = SimpleNamespace(
@@ -688,7 +688,7 @@ async def test_execute_stage_sandboxed_error_emits_failed_chat_received(monkeypa
         tokens_used=0,
         output_summary=None,
     )
-    sandbox_info = SimpleNamespace(container_name='sbx-2')
+    sandbox_info = SimpleNamespace(container_name='sbx-2', host='127.0.0.1', port=9000)
 
     fake_pipeline = _FakePipeline()
     fake_sandbox_result = SimpleNamespace(
@@ -756,7 +756,7 @@ async def test_execute_stage_sandboxed_stream_events_logged_incrementally(monkey
         tokens_used=0,
         output_summary=None,
     )
-    sandbox_info = SimpleNamespace(container_name='sbx-stream-1')
+    sandbox_info = SimpleNamespace(container_name='sbx-stream-1', host='127.0.0.1', port=9000)
 
     fake_pipeline = _FakePipeline()
     fake_sandbox_result = SimpleNamespace(
@@ -869,7 +869,7 @@ async def test_execute_stage_sandboxed_uses_agent_model_override_when_stage_mode
         started_at=None,
         last_active_at=None,
     )
-    sandbox_info = SimpleNamespace(container_name='sbx-3')
+    sandbox_info = SimpleNamespace(container_name='sbx-3', host='127.0.0.1', port=9000)
 
     fake_pipeline = _FakePipeline()
     fake_sandbox_result = SimpleNamespace(
