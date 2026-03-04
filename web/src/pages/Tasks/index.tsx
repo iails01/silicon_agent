@@ -257,12 +257,6 @@ const TaskList: React.FC = () => {
     },
     { title: '标题', dataIndex: 'title', ellipsis: true },
     {
-      title: '云效 ID',
-      dataIndex: 'yunxiao_task_id',
-      width: 120,
-      render: (_, record) => record.yunxiao_task_id ? <Tag color="blue">{record.yunxiao_task_id}</Tag> : '-',
-    },
-    {
       title: '模板',
       dataIndex: 'template_name',
       width: 100,
