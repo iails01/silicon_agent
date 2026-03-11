@@ -409,8 +409,64 @@ async def test_import_skill_bundle_persists_directory_and_syncs_db(client, temp_
         skill = result.scalar_one_or_none()
         assert skill is not None
         assert skill.git_path == f"skills/shared/{name}/SKILL.md"
+        assert skill.display_name == "Imported Skill"
+        assert skill.description == "Imported from bundle"
+        assert skill.layer == "L2"
+        assert skill.tags == ["bundle"]
         assert skill.applicable_roles == ["coding"]
         assert skill.content == "Use this imported skill."
+
+
+@pytest.mark.asyncio
+async def test_import_complex_skill_bundle_preserves_attached_files(client, temp_skills_root):
+    """Complex bundles keep references, templates, scripts, and assets on disk."""
+    name = _unique_name("complex-skill")
+    bundle = _build_skill_bundle({
+        f"coding/{name}/SKILL.md": "\n".join([
+            "---",
+            f"name: {name}",
+            "display_name: Complex Skill",
+            "description: Handles complex package contents",
+            "layer: L3",
+            "tags: [complex, packaged]",
+            "---",
+            "",
+            "Run the complex workflow.",
+        ]),
+        f"coding/{name}/references/guide.md": "# Guide\n",
+        f"coding/{name}/templates/snippet.txt": "template-body",
+        f"coding/{name}/scripts/setup.sh": "#!/bin/sh\necho setup\n",
+        f"coding/{name}/assets/config.json": '{"mode":"strict"}',
+    })
+
+    resp = await client.post(
+        "/api/v1/skills/import",
+        files={"file": (f"{name}.skill", bundle, "application/zip")},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == name
+    assert data["action"] == "created"
+    assert data["git_path"] == f"skills/coding/{name}/SKILL.md"
+
+    skill_dir = temp_skills_root / "coding" / name
+    assert (skill_dir / "references" / "guide.md").read_text(encoding="utf-8") == "# Guide\n"
+    assert (skill_dir / "templates" / "snippet.txt").read_text(encoding="utf-8") == "template-body"
+    assert (skill_dir / "scripts" / "setup.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho setup\n"
+    assert (skill_dir / "assets" / "config.json").read_text(encoding="utf-8") == '{"mode":"strict"}'
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(SkillModel).where(SkillModel.name == name))
+        skill = result.scalar_one_or_none()
+        assert skill is not None
+        assert skill.display_name == "Complex Skill"
+        assert skill.description == "Handles complex package contents"
+        assert skill.layer == "L3"
+        assert skill.tags == ["complex", "packaged"]
+        assert skill.applicable_roles == ["coding"]
+        assert skill.git_path == f"skills/coding/{name}/SKILL.md"
+        assert skill.content == "Run the complex workflow."
 
 
 @pytest.mark.asyncio
@@ -423,6 +479,8 @@ async def test_import_skill_bundle_replaces_existing_directory_contents(client, 
             f"name: {name}",
             "display_name: Replace Me",
             "description: First version",
+            "layer: L1",
+            "tags: [legacy]",
             "---",
             "",
             "v1",
@@ -433,8 +491,11 @@ async def test_import_skill_bundle_replaces_existing_directory_contents(client, 
         f"{name}/SKILL.md": "\n".join([
             "---",
             f"name: {name}",
-            "display_name: Replace Me",
+            "display_name: Replace Me Again",
             "description: Second version",
+            "layer: L2",
+            "tags: [fresh, replacement]",
+            "applicable_roles: [review]",
             "---",
             "",
             "v2",
@@ -459,6 +520,18 @@ async def test_import_skill_bundle_replaces_existing_directory_contents(client, 
     assert (skill_dir / "SKILL.md").read_text(encoding="utf-8").endswith("v2")
     assert not (skill_dir / "docs" / "legacy.txt").exists()
     assert (skill_dir / "assets" / "config.json").exists()
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(SkillModel).where(SkillModel.name == name))
+        skill = result.scalar_one_or_none()
+        assert skill is not None
+        assert skill.display_name == "Replace Me Again"
+        assert skill.description == "Second version"
+        assert skill.layer == "L2"
+        assert skill.tags == ["fresh", "replacement"]
+        assert skill.applicable_roles == ["review"]
+        assert skill.content == "v2"
+        assert skill.git_path == f"skills/shared/{name}/SKILL.md"
 
 
 @pytest.mark.asyncio

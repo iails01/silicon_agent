@@ -164,6 +164,9 @@ async def sync_skills_from_filesystem(session: AsyncSession) -> Dict[str, str]:
                 if existing.layer != parsed["layer"]:
                     existing.layer = parsed["layer"]
                     changed = True
+                if existing.tags != parsed["tags"]:
+                    existing.tags = parsed["tags"]
+                    changed = True
                 if existing.applicable_roles != applicable_roles:
                     existing.applicable_roles = applicable_roles
                     changed = True
