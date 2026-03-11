@@ -20,6 +20,7 @@ import {
   archiveSkill,
   createSkill as createSkillApi,
   getSkill,
+  importSkillBundle,
   listSkills,
   updateSkill as updateSkillApi,
 } from '@/services/skillApi';
@@ -323,6 +324,22 @@ const SkillList: React.FC = () => {
 
     setImporting(true);
     try {
+      const isSkillBundle = file.name.toLowerCase().endsWith('.skill');
+      if (isSkillBundle) {
+        const result = await importSkillBundle(file);
+        const actionLabel =
+          result.action === 'created' ? '新增' : result.action === 'updated' ? '更新' : '导入';
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['skills'] }),
+          queryClient.invalidateQueries({ queryKey: ['skillStats'] }),
+        ]);
+        actionRef.current?.reload();
+        message.success(
+          `导入完成：${result.name} 已${actionLabel}并落盘到 ${result.git_path}`,
+        );
+        return;
+      }
+
       const fileText = await file.text();
       const parsed = JSON.parse(fileText);
       const rawItems = Array.isArray(parsed) ? parsed : parsed?.items;
@@ -430,7 +447,7 @@ const SkillList: React.FC = () => {
       <input
         ref={importInputRef}
         type="file"
-        accept=".json,application/json"
+        accept=".json,.skill,application/json,application/zip"
         style={{ display: 'none' }}
         onChange={handleImportFileChange}
       />

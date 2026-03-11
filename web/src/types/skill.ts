@@ -67,3 +67,12 @@ export interface SkillSyncResponse {
   updated: number;
   details: Record<string, string>;
 }
+
+export interface SkillImportResponse {
+  name: string;
+  action: string;
+  git_path: string;
+  synced: number;
+  created: number;
+  updated: number;
+}

@@ -14,9 +14,23 @@ from app.models.skill import SkillModel
 logger = logging.getLogger(__name__)
 
 _SKILLS_ROOT = Path(__file__).resolve().parent.parent.parent / "skills"
+KNOWN_SKILL_ROLE_DIRS = {
+    "shared",
+    "orchestrator",
+    "spec",
+    "coding",
+    "test",
+    "review",
+    "smoke",
+    "doc",
+}
 
 
-def _parse_skill_md(path: Path) -> Optional[Dict]:
+def get_skills_root() -> Path:
+    return _SKILLS_ROOT
+
+
+def parse_skill_definition(path: Path) -> Optional[Dict]:
     """Parse a SKILL.md frontmatter (--- delimited YAML-like block) + body."""
     text = path.read_text(encoding="utf-8")
     # Extract frontmatter between --- markers
@@ -57,6 +71,12 @@ def _parse_skill_md(path: Path) -> Optional[Dict]:
         raw = roles_match.group(1)
         roles = [r.strip().strip('"').strip("'") for r in raw.split(",")]
 
+    git_path: Optional[str]
+    try:
+        git_path = str(path.relative_to(get_skills_root().parent))
+    except ValueError:
+        git_path = None
+
     return {
         "name": name,
         "display_name": meta.get("display_name", ""),
@@ -65,21 +85,22 @@ def _parse_skill_md(path: Path) -> Optional[Dict]:
         "tags": tags,
         "applicable_roles": roles,
         "content": body,
-        "git_path": str(path.relative_to(_SKILLS_ROOT.parent)),
+        "git_path": git_path,
     }
 
 
 async def sync_skills_from_filesystem(session: AsyncSession) -> Dict[str, str]:
     """Scan skills/ directory and upsert into DB. Returns {name: action} map."""
-    if not _SKILLS_ROOT.exists():
-        logger.info("Skills directory not found at %s, skipping sync", _SKILLS_ROOT)
+    skills_root = get_skills_root()
+    if not skills_root.exists():
+        logger.info("Skills directory not found at %s, skipping sync", skills_root)
         return {}
 
     results: Dict[str, str] = {}
 
     all_roles = ["orchestrator", "spec", "coding", "test", "review", "smoke", "doc"]
 
-    for role_dir in sorted(_SKILLS_ROOT.iterdir()):
+    for role_dir in sorted(skills_root.iterdir()):
         if not role_dir.is_dir():
             continue
         role = role_dir.name
@@ -92,7 +113,7 @@ async def sync_skills_from_filesystem(session: AsyncSession) -> Dict[str, str]:
             if not skill_md.exists():
                 continue
 
-            parsed = _parse_skill_md(skill_md)
+            parsed = parse_skill_definition(skill_md)
             if not parsed:
                 logger.warning("Failed to parse %s", skill_md)
                 continue

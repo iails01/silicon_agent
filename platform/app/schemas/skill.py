@@ -69,3 +69,12 @@ class SkillStatsResponse(BaseModel):
     by_layer: Dict[str, int]
     by_status: Dict[str, int]
     effectiveness: List[SkillEffectivenessItem] = []
+
+
+class SkillImportResponse(BaseModel):
+    name: str
+    action: str
+    git_path: str
+    synced: int
+    created: int
+    updated: int

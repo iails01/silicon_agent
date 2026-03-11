@@ -2,6 +2,7 @@ import api from './api';
 import type {
   Skill,
   SkillCreateRequest,
+  SkillImportResponse,
   SkillListResponse,
   SkillSyncResponse,
   SkillStatsResponse,
@@ -60,5 +61,12 @@ export async function getSkillStats(): Promise<SkillStatsResponse> {
 
 export async function syncSkills(): Promise<SkillSyncResponse> {
   const { data } = await api.post<SkillSyncResponse>('/skills/sync');
+  return data;
+}
+
+export async function importSkillBundle(file: File): Promise<SkillImportResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const { data } = await api.post<SkillImportResponse>('/skills/import', formData);
   return data;
 }
