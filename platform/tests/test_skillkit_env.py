@@ -6,9 +6,9 @@ from app.integration.skillkit_env import (
 )
 
 
-def test_normalize_openai_base_url_appends_v1_once():
-    assert normalize_openai_base_url("http://127.0.0.1:8317") == "http://127.0.0.1:8317/v1"
-    assert normalize_openai_base_url("http://127.0.0.1:8317/") == "http://127.0.0.1:8317/v1"
+def test_normalize_openai_base_url_preserves_path_without_forcing_v1():
+    assert normalize_openai_base_url("http://127.0.0.1:8317") == "http://127.0.0.1:8317"
+    assert normalize_openai_base_url("http://127.0.0.1:8317/") == "http://127.0.0.1:8317"
     assert normalize_openai_base_url("http://127.0.0.1:8317/v1") == "http://127.0.0.1:8317/v1"
     assert normalize_openai_base_url("http://127.0.0.1:8317/v1/") == "http://127.0.0.1:8317/v1"
 
@@ -19,7 +19,7 @@ def test_derive_skillkit_env_skips_empty_values():
         llm_base_url="http://gateway:8317",
         llm_model="",
     )
-    assert derived == {"OPENAI_BASE_URL": "http://gateway:8317/v1"}
+    assert derived == {"OPENAI_BASE_URL": "http://gateway:8317"}
 
 
 def test_hydrate_skillkit_env_preserves_existing_values_by_default():
@@ -51,5 +51,5 @@ def test_build_sandbox_llm_env_contains_platform_and_skillkit_keys():
     assert env["LLM_MODEL"] == "gpt-5.3-codex"
     assert env["AGENT_PORT"] == "9090"
     assert env["OPENAI_API_KEY"] == "test-key"
-    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:8317/v1"
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:8317"
     assert env["MINIMAX_MODEL"] == "gpt-5.3-codex"

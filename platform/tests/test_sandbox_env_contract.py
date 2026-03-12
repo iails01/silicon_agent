@@ -53,7 +53,7 @@ def test_build_docker_run_cmd_includes_skillkit_compat_env(monkeypatch, tmp_path
     assert env["LLM_BASE_URL"] == "http://127.0.0.1:8317"
     assert env["LLM_MODEL"] == "gpt-5.3-codex"
     assert env["OPENAI_API_KEY"] == "test-key"
-    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:8317/v1"
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:8317"
     assert env["MINIMAX_MODEL"] == "gpt-5.3-codex"
     assert env["AGENT_PORT"] == "19090"
     assert env["SANDBOX_DUMP_MODEL_API_RESPONSE"] == "true"
