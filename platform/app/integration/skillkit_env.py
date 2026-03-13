@@ -14,13 +14,16 @@ from collections.abc import MutableMapping
 def normalize_openai_base_url(base_url: str | None) -> str:
     """Normalize base URL for OpenAI-compatible clients.
 
-    Keep user-provided path semantics intact (for example ``/v1`` or no suffix),
-    and only normalize whitespace/trailing slash.
+    Input may come from ``LLM_BASE_URL`` which usually omits ``/v1`` because
+    platform ``LLMClient`` appends it during request construction.
     """
     value = (base_url or "").strip()
     if not value:
         return ""
-    return value.rstrip("/")
+    value = value.rstrip("/")
+    if value.endswith("/v1"):
+        return value
+    return f"{value}/v1"
 
 
 def derive_skillkit_env(
