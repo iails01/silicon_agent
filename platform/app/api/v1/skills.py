@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,11 +12,12 @@ from app.schemas.skill import (
     SkillCreateRequest,
     SkillDetailResponse,
     SkillEffectivenessItem,
+    SkillImportResponse,
     SkillListResponse,
     SkillStatsResponse,
     SkillUpdateRequest,
 )
-from app.services.skill_service import SkillService
+from app.services.skill_service import SkillImportError, SkillService
 from app.services.skill_sync_service import sync_skills_from_filesystem
 
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -50,6 +51,18 @@ async def create_skill(
     service: SkillService = Depends(get_skill_service),
 ):
     return await service.create_skill(request)
+
+
+@router.post("/import", response_model=SkillImportResponse)
+async def import_skill_bundle(
+    file: UploadFile = File(...),
+    service: SkillService = Depends(get_skill_service),
+):
+    try:
+        payload = await file.read()
+        return await service.import_skill_bundle(file.filename, payload)
+    except SkillImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/stats", response_model=SkillStatsResponse)

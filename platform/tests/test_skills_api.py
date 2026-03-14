@@ -1,4 +1,7 @@
 """Tests for the Skills API endpoints."""
+import io
+import zipfile
+
 import pytest
 import pytest_asyncio
 from uuid import uuid4
@@ -7,10 +10,19 @@ from sqlalchemy import select
 
 from app.db.session import async_session_factory
 from app.models.skill import SkillModel, SkillVersionModel
+from app.services import skill_sync_service
 
 
 def _unique_name(prefix: str = "skill-test") -> str:
     return f"{prefix}-{uuid4().hex[:12]}"
+
+
+def _build_skill_bundle(files: dict[str, str]) -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for path, content in files.items():
+            bundle.writestr(path, content)
+    return archive.getvalue()
 
 
 @pytest_asyncio.fixture
@@ -58,6 +70,14 @@ async def skill_factory():
                     await session.delete(v)
                 await session.delete(skill)
         await session.commit()
+
+
+@pytest.fixture
+def temp_skills_root(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(skill_sync_service, "_SKILLS_ROOT", skills_root)
+    return skills_root
 
 
 # ── Create ────────────────────────────────────────────
@@ -345,3 +365,196 @@ async def test_skill_stats(client, skill_factory):
     assert data["by_layer"]["L1"] >= 1
     assert data["by_layer"]["L2"] >= 1
     assert "active" in data["by_status"]
+
+
+# ── Import .skill ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_import_skill_bundle_persists_directory_and_syncs_db(client, temp_skills_root):
+    """POST /api/v1/skills/import installs a .skill bundle to skills/ and syncs DB."""
+    name = _unique_name("imported-skill")
+    bundle = _build_skill_bundle({
+        "SKILL.md": "\n".join([
+            "---",
+            f"name: {name}",
+            "display_name: Imported Skill",
+            "description: Imported from bundle",
+            "layer: L2",
+            "tags: [bundle]",
+            "applicable_roles: [coding]",
+            "---",
+            "",
+            "Use this imported skill.",
+        ]),
+    })
+
+    resp = await client.post(
+        "/api/v1/skills/import",
+        files={"file": (f"{name}.skill", bundle, "application/zip")},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == name
+    assert data["action"] == "created"
+    assert data["git_path"] == f"skills/shared/{name}/SKILL.md"
+
+    skill_dir = temp_skills_root / "shared" / name
+    assert skill_dir.exists()
+    assert (skill_dir / "SKILL.md").exists()
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(SkillModel).where(SkillModel.name == name))
+        skill = result.scalar_one_or_none()
+        assert skill is not None
+        assert skill.git_path == f"skills/shared/{name}/SKILL.md"
+        assert skill.display_name == "Imported Skill"
+        assert skill.description == "Imported from bundle"
+        assert skill.layer == "L2"
+        assert skill.tags == ["bundle"]
+        assert skill.applicable_roles == ["coding"]
+        assert skill.content == "Use this imported skill."
+
+
+@pytest.mark.asyncio
+async def test_import_complex_skill_bundle_preserves_attached_files(client, temp_skills_root):
+    """Complex bundles keep references, templates, scripts, and assets on disk."""
+    name = _unique_name("complex-skill")
+    bundle = _build_skill_bundle({
+        f"coding/{name}/SKILL.md": "\n".join([
+            "---",
+            f"name: {name}",
+            "display_name: Complex Skill",
+            "description: Handles complex package contents",
+            "layer: L3",
+            "tags: [complex, packaged]",
+            "---",
+            "",
+            "Run the complex workflow.",
+        ]),
+        f"coding/{name}/references/guide.md": "# Guide\n",
+        f"coding/{name}/templates/snippet.txt": "template-body",
+        f"coding/{name}/scripts/setup.sh": "#!/bin/sh\necho setup\n",
+        f"coding/{name}/assets/config.json": '{"mode":"strict"}',
+    })
+
+    resp = await client.post(
+        "/api/v1/skills/import",
+        files={"file": (f"{name}.skill", bundle, "application/zip")},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == name
+    assert data["action"] == "created"
+    assert data["git_path"] == f"skills/coding/{name}/SKILL.md"
+
+    skill_dir = temp_skills_root / "coding" / name
+    assert (skill_dir / "references" / "guide.md").read_text(encoding="utf-8") == "# Guide\n"
+    assert (skill_dir / "templates" / "snippet.txt").read_text(encoding="utf-8") == "template-body"
+    assert (skill_dir / "scripts" / "setup.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho setup\n"
+    assert (skill_dir / "assets" / "config.json").read_text(encoding="utf-8") == '{"mode":"strict"}'
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(SkillModel).where(SkillModel.name == name))
+        skill = result.scalar_one_or_none()
+        assert skill is not None
+        assert skill.display_name == "Complex Skill"
+        assert skill.description == "Handles complex package contents"
+        assert skill.layer == "L3"
+        assert skill.tags == ["complex", "packaged"]
+        assert skill.applicable_roles == ["coding"]
+        assert skill.git_path == f"skills/coding/{name}/SKILL.md"
+        assert skill.content == "Run the complex workflow."
+
+
+@pytest.mark.asyncio
+async def test_import_skill_bundle_replaces_existing_directory_contents(client, temp_skills_root):
+    """Re-importing the same skill removes stale files before installing the new bundle."""
+    name = _unique_name("replace-skill")
+    first_bundle = _build_skill_bundle({
+        f"{name}/SKILL.md": "\n".join([
+            "---",
+            f"name: {name}",
+            "display_name: Replace Me",
+            "description: First version",
+            "layer: L1",
+            "tags: [legacy]",
+            "---",
+            "",
+            "v1",
+        ]),
+        f"{name}/docs/legacy.txt": "legacy",
+    })
+    second_bundle = _build_skill_bundle({
+        f"{name}/SKILL.md": "\n".join([
+            "---",
+            f"name: {name}",
+            "display_name: Replace Me Again",
+            "description: Second version",
+            "layer: L2",
+            "tags: [fresh, replacement]",
+            "applicable_roles: [review]",
+            "---",
+            "",
+            "v2",
+        ]),
+        f"{name}/assets/config.json": '{"version": 2}',
+    })
+
+    first_resp = await client.post(
+        "/api/v1/skills/import",
+        files={"file": (f"{name}.skill", first_bundle, "application/zip")},
+    )
+    assert first_resp.status_code == 200
+
+    second_resp = await client.post(
+        "/api/v1/skills/import",
+        files={"file": (f"{name}.skill", second_bundle, "application/zip")},
+    )
+    assert second_resp.status_code == 200
+    assert second_resp.json()["action"] == "updated"
+
+    skill_dir = temp_skills_root / "shared" / name
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8").endswith("v2")
+    assert not (skill_dir / "docs" / "legacy.txt").exists()
+    assert (skill_dir / "assets" / "config.json").exists()
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(SkillModel).where(SkillModel.name == name))
+        skill = result.scalar_one_or_none()
+        assert skill is not None
+        assert skill.display_name == "Replace Me Again"
+        assert skill.description == "Second version"
+        assert skill.layer == "L2"
+        assert skill.tags == ["fresh", "replacement"]
+        assert skill.applicable_roles == ["review"]
+        assert skill.content == "v2"
+        assert skill.git_path == f"skills/shared/{name}/SKILL.md"
+
+
+@pytest.mark.asyncio
+async def test_import_skill_bundle_rejects_missing_skill_md(client, temp_skills_root):
+    """Bundles without SKILL.md are rejected with a clear error."""
+    bundle = _build_skill_bundle({"notes.txt": "missing"})
+
+    resp = await client.post(
+        "/api/v1/skills/import",
+        files={"file": ("broken.skill", bundle, "application/zip")},
+    )
+
+    assert resp.status_code == 400
+    assert "SKILL.md" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_import_skill_bundle_rejects_invalid_zip(client, temp_skills_root):
+    """Invalid .skill archives are rejected."""
+    resp = await client.post(
+        "/api/v1/skills/import",
+        files={"file": ("broken.skill", b"not-a-zip", "application/octet-stream")},
+    )
+
+    assert resp.status_code == 400
+    assert "不是有效的 .skill 压缩包" in resp.json()["detail"]

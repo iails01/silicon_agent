@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import io
+import re
+import shutil
+import stat
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
 
 from sqlalchemy import String, cast, func, select
@@ -10,15 +17,155 @@ from app.schemas.skill import (
     SkillCreateRequest,
     SkillDetailResponse,
     SkillEffectivenessItem,
+    SkillImportResponse,
     SkillListResponse,
     SkillStatsResponse,
     SkillUpdateRequest,
 )
+from app.services import skill_sync_service
+
+
+class SkillImportError(ValueError):
+    pass
+
+
+def _sanitize_skill_dir_name(name: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip(".-")
+    if not sanitized:
+        raise SkillImportError("无法根据 skill name 生成有效目录名")
+    return sanitized
 
 
 class SkillService:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    def _normalize_archive_path(self, raw_path: str) -> PurePosixPath:
+        normalized = raw_path.replace("\\", "/").strip("/")
+        path = PurePosixPath(normalized)
+        if (
+            not normalized
+            or path.is_absolute()
+            or ".." in path.parts
+            or any(part in {"", "."} for part in path.parts)
+        ):
+            raise SkillImportError(f"导入包包含不安全路径: {raw_path}")
+        return path
+
+    def _resolve_import_role(self, skill_root: PurePosixPath) -> str:
+        if skill_root.parts and skill_root.parts[0] in skill_sync_service.KNOWN_SKILL_ROLE_DIRS:
+            return skill_root.parts[0]
+        return "shared"
+
+    async def _list_existing_skill_dirs(self, skill_name: str) -> list[Path]:
+        paths: set[Path] = set()
+        skills_root = skill_sync_service.get_skills_root()
+
+        result = await self.session.execute(
+            select(SkillModel).where(SkillModel.name == skill_name)
+        )
+        existing = result.scalar_one_or_none()
+        if existing and existing.git_path:
+            existing_path = (skills_root.parent / existing.git_path).resolve()
+            if existing_path.name == "SKILL.md":
+                paths.add(existing_path.parent)
+            elif existing_path.is_dir():
+                paths.add(existing_path)
+
+        if skills_root.exists():
+            for skill_md in skills_root.rglob("SKILL.md"):
+                parsed = skill_sync_service.parse_skill_definition(skill_md)
+                if parsed and parsed.get("name") == skill_name:
+                    paths.add(skill_md.parent)
+
+        return sorted(paths)
+
+    async def import_skill_bundle(
+        self,
+        filename: Optional[str],
+        content: bytes,
+    ) -> SkillImportResponse:
+        if not content:
+            raise SkillImportError("导入包为空")
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                file_entries: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    archive_path = self._normalize_archive_path(info.filename)
+                    mode = info.external_attr >> 16
+                    if stat.S_ISLNK(mode):
+                        raise SkillImportError("导入包不能包含符号链接")
+                    file_entries.append((info, archive_path))
+
+                if not file_entries:
+                    raise SkillImportError("导入包为空")
+
+                skill_md_entries = [
+                    archive_path
+                    for _, archive_path in file_entries
+                    if archive_path.name == "SKILL.md"
+                ]
+                if not skill_md_entries:
+                    raise SkillImportError("导入包缺少 SKILL.md")
+                if len(skill_md_entries) > 1:
+                    raise SkillImportError("导入包只能包含一个 SKILL.md")
+
+                skill_md_path = skill_md_entries[0]
+                skill_root = skill_md_path.parent
+
+                with tempfile.TemporaryDirectory(prefix="skill_import_") as temp_dir:
+                    temp_root = Path(temp_dir)
+                    archive.extractall(temp_root)
+
+                    extracted_skill_root = temp_root
+                    if skill_root.parts:
+                        extracted_skill_root = temp_root.joinpath(*skill_root.parts)
+
+                    skill_md_file = extracted_skill_root / "SKILL.md"
+                    parsed = skill_sync_service.parse_skill_definition(skill_md_file)
+                    if not parsed:
+                        raise SkillImportError("SKILL.md 缺少有效 frontmatter，无法解析 skill name")
+
+                    skill_name = str(parsed.get("name", "")).strip()
+                    if not skill_name:
+                        raise SkillImportError("SKILL.md 缺少有效的 name")
+
+                    target_role = self._resolve_import_role(skill_root)
+                    target_dir = (
+                        skill_sync_service.get_skills_root()
+                        / target_role
+                        / _sanitize_skill_dir_name(skill_name)
+                    )
+
+                    for existing_dir in await self._list_existing_skill_dirs(skill_name):
+                        if existing_dir.exists():
+                            shutil.rmtree(existing_dir, ignore_errors=True)
+
+                    if target_dir.exists():
+                        shutil.rmtree(target_dir, ignore_errors=True)
+                    target_dir.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(extracted_skill_root, target_dir)
+
+        except zipfile.BadZipFile as exc:
+            bundle_name = filename or "skill.skill"
+            raise SkillImportError(f"{bundle_name} 不是有效的 .skill 压缩包") from exc
+
+        sync_result = await skill_sync_service.sync_skills_from_filesystem(self.session)
+        imported = await self.get_skill(skill_name)
+        if imported is None:
+            raise SkillImportError("导入完成后未能在数据库中找到 skill 记录")
+
+        return SkillImportResponse(
+            name=imported.name,
+            action=sync_result.get(imported.name, "unchanged"),
+            git_path=imported.git_path or "",
+            synced=len(sync_result),
+            created=sum(1 for value in sync_result.values() if value == "created"),
+            updated=sum(1 for value in sync_result.values() if value == "updated"),
+        )
 
     async def list_skills(
         self,
